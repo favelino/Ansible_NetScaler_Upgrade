@@ -88,9 +88,14 @@ ansible-vault create group_vars/all/vault.yml
 Enter this content in the Vault editor:
 
 ```yaml
-nitro_user: nsroot
-nitro_pass: "replace-with-the-real-password"
+vault_nitro_user: nsroot
+vault_nitro_pass: "replace-with-the-real-password"
 ```
+
+The committed `group_vars/all/main.yml` maps these encrypted values to the
+`nitro_user` and `nitro_pass` variables expected by the upstream playbook.
+The local `vault.yml` and common Vault password-file names are ignored by Git.
+Never commit a plaintext Vault password file.
 
 Run the upgrade with:
 
