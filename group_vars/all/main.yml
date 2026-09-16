@@ -1,0 +1,5 @@
+---
+# The encrypted vault.yml file defines these two variables.
+nitro_user: "{{ vault_nitro_user }}"
+nitro_pass: "{{ vault_nitro_pass }}"
+

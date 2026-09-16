@@ -1,0 +1,6 @@
+---
+# Example schema only. Do not place a real password in this file.
+# Create group_vars/all/vault.yml with `ansible-vault create` instead.
+vault_nitro_user: nsroot
+vault_nitro_pass: replace-with-the-real-password
+

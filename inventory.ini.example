@@ -1,0 +1,8 @@
+# Generated inventory has this shape. Credentials belong in Ansible Vault,
+# never in inventory.ini.
+[primary_netscaler]
+10.100.48.1 nsip=10.100.48.1 validate_certs=no
+
+[secondary_netscaler]
+10.100.48.2 nsip=10.100.48.2 validate_certs=no
+

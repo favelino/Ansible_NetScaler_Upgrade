@@ -20,7 +20,7 @@ writing the inventory it verifies that:
 
 - Every instance is reachable (`Up`).
 - HA is configured.
-- HA sync is `ENABLED` or `SUCCESS`.
+- HA sync matches Console's healthy role-specific state: Primary is `ENABLED` and Secondary is `SUCCESS`.
 - Every peer is present and points back to its partner.
 - Every pair has exactly one Primary and one Secondary.
 

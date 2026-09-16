@@ -1,0 +1,2 @@
+# The inventory generator uses only the Python standard library.
+# Ansible and the Citrix collection are installed separately; see README.md.

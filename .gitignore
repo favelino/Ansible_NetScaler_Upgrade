@@ -1,0 +1,25 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Generated inventory and local secrets
+inventory.ini
+group_vars/**/vault.yml
+*.vault.yml
+.vault-password*
+.vault_pass*
+
+# NetScaler firmware/build archives
+firmware/
+*.tgz
+*.tar.gz
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
