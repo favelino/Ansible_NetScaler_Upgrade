@@ -48,10 +48,36 @@ class InventoryTests(unittest.TestCase):
         pairs = validate_instances(sample_nodes())
         self.assertEqual(len(pairs), 1)
         output = render_inventory(pairs)
-        self.assertIn("[primary_netscaler]\n10.100.48.1", output)
-        self.assertIn("[secondary_netscaler]\n10.100.48.2", output)
+        self.assertIn("[netscaler_nodes]", output)
+        self.assertIn("ns_192_0_2_10 ansible_host=192.0.2.10", output)
+        self.assertIn("[primary_netscaler]\nns_192_0_2_10", output)
+        self.assertIn("[secondary_netscaler]\nns_192_0_2_11", output)
+        self.assertIn("[netscaler_ha_pairs]", output)
+        self.assertIn(
+            "pair_001 pair_name=\"lab-ns-primary / lab-ns-secondary\" "
+            "primary_host=ns_192_0_2_10 secondary_host=ns_192_0_2_11",
+            output,
+        )
         self.assertNotIn("password", output.lower())
         self.assertNotIn("nitro_pass", output)
+
+    def test_renders_multiple_pairs_as_independent_jobs(self):
+        nodes = sample_nodes()
+        second_pair = json.loads(json.dumps(nodes))
+        second_pair[0].update(
+            hostname="lab-ns-primary-2",
+            ns_ip_address="192.0.2.20",
+            ha_ip_address="192.0.2.21",
+        )
+        second_pair[1].update(
+            hostname="lab-ns-secondary-2",
+            ns_ip_address="192.0.2.21",
+            ha_ip_address="192.0.2.20",
+        )
+        output = render_inventory(validate_instances(nodes + second_pair))
+        self.assertIn("pair_001", output)
+        self.assertIn("pair_002", output)
+        self.assertEqual(output.count(" primary_host="), 2)
 
     def test_rejects_role_specific_sync_mismatch(self):
         nodes = sample_nodes()
@@ -71,7 +97,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_rejects_nonreciprocal_peer(self):
         nodes = sample_nodes()
-        nodes[1]["ha_ip_address"] = "10.100.48.99"
+        nodes[1]["ha_ip_address"] = "192.0.2.99"
         with self.assertRaisesRegex(InventoryError, "not reciprocal"):
             validate_instances(nodes)
 

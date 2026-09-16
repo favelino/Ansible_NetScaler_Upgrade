@@ -16,10 +16,10 @@ group_vars/**/vault.yml
 firmware/
 *.tgz
 *.tar.gz
+reports/
 
 # Editors and operating systems
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
-

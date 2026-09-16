@@ -1,0 +1,26 @@
+# NetScaler HA Upgrade Report
+
+- Run ID: `{{ upgrade_run_id }}`
+- Started: {{ upgrade_run_started }}
+- Finished: {{ upgrade_run_ended }}
+- Duration: {{ upgrade_run_duration }} seconds
+- Target version: `{{ netscaler_target_version }}`
+- Configured concurrency: {{ ha_pairs_parallel }} HA pairs
+- Result: **{{ 'SUCCESS' if failed_pairs | length == 0 else 'FAILED' }}**
+- Successful pairs: {{ successful_pairs | length }}
+- Failed pairs: {{ failed_pairs | length }}
+
+| HA pair | Original Primary | Original Secondary | Primary version | Secondary version | Duration | Status |
+|---|---|---|---|---|---:|---|
+{% for result in upgrade_results %}
+| {{ result.pair | replace('|', '\\|') }} | {{ result.original_primary }} | {{ result.original_secondary }} | {{ result.primary_before }} → {{ result.primary_after }} | {{ result.secondary_before }} → {{ result.secondary_after }} | {{ result.duration_seconds }}s | **{{ result.status }}** |
+{% endfor %}
+
+{% if failed_pairs | length %}
+## Failures
+
+{% for result in failed_pairs %}
+- **{{ result.pair }}:** {{ result.error | replace('\n', ' ') }}
+{% endfor %}
+{% endif %}
+

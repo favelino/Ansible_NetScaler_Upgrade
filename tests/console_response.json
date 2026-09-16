@@ -2,22 +2,21 @@
   "ns": [
     {
       "instance_state": "Up",
-      "ha_ip_address": "10.100.48.2",
+      "ha_ip_address": "192.0.2.11",
       "ha_master_state": "Primary",
       "is_ha_configured": "true",
-      "hostname": "ns-1",
+      "hostname": "lab-ns-primary",
       "ha_sync": "ENABLED",
-      "ns_ip_address": "10.100.48.1"
+      "ns_ip_address": "192.0.2.10"
     },
     {
       "instance_state": "Up",
-      "ha_ip_address": "10.100.48.1",
+      "ha_ip_address": "192.0.2.10",
       "ha_master_state": "Secondary",
       "is_ha_configured": "true",
-      "hostname": "ns-2",
+      "hostname": "lab-ns-secondary",
       "ha_sync": "SUCCESS",
-      "ns_ip_address": "10.100.48.2"
+      "ns_ip_address": "192.0.2.11"
     }
   ]
 }
-

@@ -172,16 +172,40 @@ def render_inventory(pairs: Iterable[tuple[dict[str, Any], dict[str, Any]]]) -> 
     pairs = list(pairs)
     lines = [
         "# Generated from NetScaler Console. Do not add credentials here.",
-        "[primary_netscaler]",
+        "# Each entry in netscaler_ha_pairs is one independently scheduled upgrade job.",
+        "[netscaler_nodes]",
     ]
-    for primary, _ in pairs:
-        ip = _text(primary["ns_ip_address"])
-        lines.append(f"{ip} nsip={ip} validate_certs=no")
+    aliases: dict[str, str] = {}
+    for primary, secondary in pairs:
+        for node in (primary, secondary):
+            ip = _text(node["ns_ip_address"])
+            alias = "ns_" + ip.replace(".", "_").replace(":", "_")
+            aliases[ip] = alias
+            hostname = json.dumps(_text(node["hostname"]))
+            lines.append(
+                f"{alias} ansible_host={ip} nsip={ip} "
+                f"netscaler_hostname={hostname} validate_certs=no"
+            )
 
+    lines.extend(["", "[primary_netscaler]"])
+    lines.extend(aliases[_text(primary["ns_ip_address"])] for primary, _ in pairs)
     lines.extend(["", "[secondary_netscaler]"])
-    for _, secondary in pairs:
-        ip = _text(secondary["ns_ip_address"])
-        lines.append(f"{ip} nsip={ip} validate_certs=no")
+    lines.extend(aliases[_text(secondary["ns_ip_address"])] for _, secondary in pairs)
+
+    lines.extend(["", "[netscaler_ha_pairs]"])
+    for index, (primary, secondary) in enumerate(pairs, start=1):
+        primary_ip = _text(primary["ns_ip_address"])
+        secondary_ip = _text(secondary["ns_ip_address"])
+        pair_name = json.dumps(
+            f"{_text(primary['hostname'])} / {_text(secondary['hostname'])}"
+        )
+        lines.append(
+            f"pair_{index:03d} pair_name={pair_name} "
+            f"primary_host={aliases[primary_ip]} secondary_host={aliases[secondary_ip]} "
+            f"primary_nsip={primary_ip} secondary_nsip={secondary_ip}"
+        )
+
+    lines.extend(["", "[netscaler_ha_pairs:vars]", "ansible_connection=local"])
     return "\n".join(lines) + "\n"
 
 

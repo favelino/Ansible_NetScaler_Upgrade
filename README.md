@@ -1,38 +1,25 @@
 # NetScaler HA upgrade with dynamic inventory
 
-This repository contains the NetScaler Automation Toolkit **normal-mode HA upgrade**
-template plus a generator that builds `inventory.ini` from the live HA state reported
-by NetScaler Console.
+This repository extends the NetScaler Automation Toolkit **normal-mode HA upgrade**
+with live NetScaler Console discovery, bounded parallel execution by HA pair,
+progress feedback, final validation, and JSON/Markdown reports.
 
 Source template: [`netscaler/automation-toolkit`](https://github.com/netscaler/automation-toolkit/tree/main/golden_templates/upgrade-netscaler/high-availability/normal-mode).
 
-## What the generator does
+## Safety model
 
-`generate_netscaler_inventory.py` calls:
+Every generated HA pair becomes one Ansible job. Within a pair, the order is fixed:
 
-```text
-GET https://<console>/nitro/v2/config/ns
-```
+1. Confirm both NSIPs passed preflight.
+2. Upgrade and validate the original Secondary.
+3. Fail over to the upgraded Secondary.
+4. Upgrade and validate the original Primary.
+5. Fail back and restore the original roles.
+6. Verify both versions and both final HA roles.
 
-It requests only `hostname`, `ns_ip_address`, `ha_ip_address`,
-`ha_master_state`, `ha_sync`, `instance_state`, and `is_ha_configured`. Before
-writing the inventory it verifies that:
-
-- Every instance is reachable (`Up`).
-- HA is configured.
-- HA sync matches Console's healthy role-specific state: Primary is `ENABLED` and Secondary is `SUCCESS`.
-- Every peer is present and points back to its partner.
-- Every pair has exactly one Primary and one Secondary.
-
-The resulting groups match `ha_upgrade.yaml`:
-
-```ini
-[primary_netscaler]
-10.100.48.1 nsip=10.100.48.1 validate_certs=no
-
-[secondary_netscaler]
-10.100.48.2 nsip=10.100.48.2 validate_certs=no
-```
+Different pairs may run concurrently. `ha_pairs_parallel` controls the maximum
+number of complete pairs in flight; it never parallelizes the two nodes within the
+same pair.
 
 ## Install
 
@@ -43,22 +30,25 @@ python3 -m pip install -r requirements.txt
 ansible-galaxy collection install git+https://github.com/citrix/citrix-adc-ansible-modules.git#/ansible-collections/adc
 ```
 
-The upstream template documents Ansible 4.9.0. Test newer Ansible versions in a
-non-production HA pair before using them for an upgrade.
+The upstream template documents Ansible 4.9.0. Test your installed Ansible and
+collection versions against a non-production HA pair first.
 
-## Generate `inventory.ini`
+## Generate the inventory from NetScaler Console
 
-The safest interactive method is to provide the Console username and let the
-script prompt for its password without displaying it:
+The generator calls:
 
-```bash
-python3 generate_netscaler_inventory.py \
-  --console-url https://console.example.com \
-  --console-user automation-api \
-  --output inventory.ini
+```text
+GET https://<console>/nitro/v2/config/ns
 ```
 
-Use a trusted CA bundle when Console uses a private CA:
+It handles pagination and requests only `hostname`, `ns_ip_address`,
+`ha_ip_address`, `ha_master_state`, `ha_sync`, `instance_state`, and
+`is_ha_configured`. It refuses to write an inventory unless:
+
+- Every instance is `Up` and configured for HA.
+- Primary sync is `ENABLED`; Secondary sync is `SUCCESS`.
+- Every peer exists and points back to its partner.
+- Every pair contains exactly one Primary and one Secondary.
 
 ```bash
 python3 generate_netscaler_inventory.py \
@@ -68,58 +58,104 @@ python3 generate_netscaler_inventory.py \
   --output inventory.ini
 ```
 
-For non-interactive automation, inject `NETSCALER_CONSOLE_USER` and
-`NETSCALER_CONSOLE_PASS` from your secrets platform. Do not place them in this
-repository. `--insecure` is available for a lab but disables TLS verification.
+The password is requested without echoing. For automation, inject
+`NETSCALER_CONSOLE_USER` and `NETSCALER_CONSOLE_PASS` from a protected secrets
+store. `--insecure` disables TLS verification and is intended only for a lab.
+Existing output is protected unless `--force` is supplied.
 
-If `inventory.ini` already exists, the generator refuses to replace it unless
-you add `--force`.
+The generated inventory contains real NetScaler hosts plus synthetic pair hosts:
 
-## Store `nsroot` credentials safely
+```ini
+[netscaler_nodes]
+ns_192_0_2_10 ansible_host=192.0.2.10 nsip=192.0.2.10 netscaler_hostname="lab-ns-primary" validate_certs=no
+ns_192_0_2_11 ansible_host=192.0.2.11 nsip=192.0.2.11 netscaler_hostname="lab-ns-secondary" validate_certs=no
 
-Do not put `nitro_pass` in `inventory.ini`. The playbook reads it as an Ansible
-variable, so an encrypted `group_vars` file works without modifying the inventory.
+[netscaler_ha_pairs]
+pair_001 pair_name="lab-ns-primary / lab-ns-secondary" primary_host=ns_192_0_2_10 secondary_host=ns_192_0_2_11 primary_nsip=192.0.2.10 secondary_nsip=192.0.2.11
+```
+
+## Store credentials with Ansible Vault
+
+Never place NetScaler or Console passwords in `inventory.ini`.
 
 ```bash
 mkdir -p group_vars/all
 ansible-vault create group_vars/all/vault.yml
 ```
 
-Enter this content in the Vault editor:
+Store this schema in the encrypted file:
 
 ```yaml
 vault_nitro_user: nsroot
 vault_nitro_pass: "replace-with-the-real-password"
 ```
 
-The committed `group_vars/all/main.yml` maps these encrypted values to the
-`nitro_user` and `nitro_pass` variables expected by the upstream playbook.
-The local `vault.yml` and common Vault password-file names are ignored by Git.
-Never commit a plaintext Vault password file.
+`group_vars/all/main.yml` maps those encrypted values to the variables required by
+the playbook. Local `vault.yml` and common Vault password-file names are ignored by
+Git. Never commit a plaintext Vault password file. For enterprise automation, use
+a dedicated least-privilege account and an external secrets lookup.
 
-Run the upgrade with:
+## Configure the build and concurrency
 
-```bash
-ansible-playbook ha_upgrade.yaml -i inventory.ini --ask-vault-pass
+Edit `variables.yaml` for the target build and controller paths. The concurrency
+default is:
+
+```yaml
+ha_pairs_parallel: 2
 ```
 
-For enterprise automation, prefer a dedicated least-privilege NetScaler account
-and retrieve its secret at runtime with the appropriate Ansible lookup plugin for
-HashiCorp Vault, CyberArk, AWS Secrets Manager, or Azure Key Vault. Keep the
-authentication token in the CI/CD platform's protected secret store.
+You can override it for one execution. This example upgrades at most five complete
+HA pairs simultaneously:
 
-## Configure the target build
+```bash
+ansible-playbook ha_upgrade.yaml \
+  -i inventory.ini \
+  --ask-vault-pass \
+  -e ha_pairs_parallel=5
+```
 
-Edit `variables.yaml`:
+Ansible `forks` must be at least as large as the desired concurrency. This
+repository defaults to 50 forks in `ansible.cfg`; override with `--forks` when
+required.
 
-- `netscaler_build_location`: location on the NetScaler, including trailing `/`.
-- `netscaler_build_file_name`: target build archive name.
-- `netscaler_target_version`: release and build, for example `14.1-47.48`.
-- `want_to_copy_build`: `yes` to upload from the controller, otherwise `no`.
-- `local_build_file_full_path_with_name`: local archive path when copying.
+## Live progress and reachability feedback
 
-The template also requires passwordless SSH between the controller and both
-NetScalers.
+Before upgrading, the playbook checks TCP/22 on every NSIP and prints a fleet
+summary such as:
+
+```text
+Connecting to 50 devices: 47 reachable, 3 not reachable.
+Unreachable devices: lab-ns-03 (192.0.2.13), lab-ns-08 (192.0.2.18), lab-ns-21 (192.0.2.31).
+```
+
+A pair with either node unreachable is marked `FAILED` and skipped. Other healthy
+pairs continue. During execution, task names contain the pair and current step:
+
+```text
+STEP 03-05/12 | lab-ns-primary / lab-ns-secondary | Run installns on Original Secondary
+STEP 06/12    | lab-ns-primary / lab-ns-secondary | Fail over to upgraded Secondary
+STEP 12/12    | lab-ns-primary / lab-ns-secondary | Validate versions and restored roles
+```
+
+`installns` uses Ansible async polling, so the controller continues to show polling
+feedback instead of appearing idle during the long installation step. Secret-bearing
+commands use `no_log` so credentials do not appear in progress output.
+
+## Reports and final result
+
+Every run writes two control-node artifacts under `reports/`:
+
+- `upgrade-<UTC-run-id>.json` for automation and ingestion.
+- `upgrade-<UTC-run-id>.md` for a readable audit report.
+
+Each pair record includes original NSIPs, versions before and after, target version,
+duration, status, and failure detail. A pair is `SUCCESS` only after both nodes match
+the target version and `show ha node` confirms the original Primary and Secondary
+roles were restored.
+
+The final console message reports succeeded and failed pair counts. The playbook
+returns a non-zero exit code if any pair fails final validation, after writing both
+reports.
 
 ## Test without calling Console
 
@@ -130,11 +166,5 @@ python3 generate_netscaler_inventory.py \
   --output /tmp/inventory.ini
 ```
 
-Review the generated inventory and the current HA status immediately before an
-upgrade. HA roles can change after the inventory is generated.
-
-## Important operational note
-
-The upstream workflow upgrades the current Secondary first, forces failover, and
-then upgrades the old Primary. Run the inventory generator immediately before the
-playbook; do not reuse a stale inventory after a failover or topology change.
+Generate the inventory immediately before the upgrade. Do not reuse it after a
+failover or topology change because the recorded Primary/Secondary roles may be stale.

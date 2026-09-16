@@ -1,8 +1,16 @@
-# Generated inventory has this shape. Credentials belong in Ansible Vault,
-# never in inventory.ini.
+# Generated inventory has this shape. Credentials belong in Ansible Vault.
+[netscaler_nodes]
+ns_192_0_2_10 ansible_host=192.0.2.10 nsip=192.0.2.10 netscaler_hostname="lab-ns-primary" validate_certs=no
+ns_192_0_2_11 ansible_host=192.0.2.11 nsip=192.0.2.11 netscaler_hostname="lab-ns-secondary" validate_certs=no
+
 [primary_netscaler]
-10.100.48.1 nsip=10.100.48.1 validate_certs=no
+ns_192_0_2_10
 
 [secondary_netscaler]
-10.100.48.2 nsip=10.100.48.2 validate_certs=no
+ns_192_0_2_11
 
+[netscaler_ha_pairs]
+pair_001 pair_name="lab-ns-primary / lab-ns-secondary" primary_host=ns_192_0_2_10 secondary_host=ns_192_0_2_11 primary_nsip=192.0.2.10 secondary_nsip=192.0.2.11
+
+[netscaler_ha_pairs:vars]
+ansible_connection=local

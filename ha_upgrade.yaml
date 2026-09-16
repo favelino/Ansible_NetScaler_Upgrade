@@ -1,209 +1,301 @@
-- hosts: secondary_netscaler
-  remote_user: "{{ nitro_user }}"
-  connection: citrix.adc.ssh_citrix_adc
+---
+- name: Initialize the NetScaler HA upgrade run
+  hosts: localhost
+  connection: local
   gather_facts: false
-  vars_files: variables.yaml
+  vars_files:
+    - variables.yaml
+  tasks:
+    - name: Validate concurrency and inventory
+      ansible.builtin.assert:
+        that:
+          - ha_pairs_parallel | int > 0
+          - groups['netscaler_ha_pairs'] | default([]) | length > 0
+          - groups['netscaler_nodes'] | default([]) | length > 0
+        fail_msg: "Inventory must contain NetScaler nodes and HA pairs; ha_pairs_parallel must be greater than zero."
 
-  vars:
-    ansible_python_interpreter: '{{ netscaler_python_path | default("/var/python/bin/python") }}'
+    - name: Create run metadata
+      ansible.builtin.set_fact:
+        upgrade_run_id: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+        upgrade_run_started: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        upgrade_run_started_epoch: "{{ lookup('pipe', 'date -u +%s') | int }}"
+
+    - name: Create the report directory
+      ansible.builtin.file:
+        path: "{{ report_directory }}"
+        state: directory
+        mode: "0700"
+
+    - name: Announce the run
+      ansible.builtin.debug:
+        msg: >-
+          Starting run {{ upgrade_run_id }} for {{ groups['netscaler_ha_pairs'] | length }} HA pairs
+          ({{ groups['netscaler_nodes'] | length }} devices), with up to
+          {{ ha_pairs_parallel | int }} pairs executing simultaneously.
+
+- name: Preflight connectivity for every NetScaler
+  hosts: netscaler_nodes
+  connection: local
+  gather_facts: false
+  strategy: free
+  vars_files:
+    - variables.yaml
+  tasks:
+    - name: "PREFLIGHT | Test SSH connectivity to {{ netscaler_hostname | default(inventory_hostname) }} ({{ nsip }})"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(nsip) }}"
+        port: "{{ netscaler_ssh_port }}"
+        connect_timeout: "{{ preflight_connect_timeout }}"
+        timeout: "{{ preflight_connect_timeout }}"
+        state: started
+      delegate_to: localhost
+      register: preflight_connection
+      ignore_errors: true
+      changed_when: false
+
+    - name: Record preflight result
+      ansible.builtin.set_fact:
+        upgrade_reachable: "{{ not (preflight_connection.failed | default(false)) }}"
+      delegate_to: localhost
+
+- name: Summarize fleet preflight
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - variables.yaml
+  tasks:
+    - name: Initialize reachability lists
+      ansible.builtin.set_fact:
+        reachable_devices: []
+        unreachable_devices: []
+
+    - name: Collect reachable devices
+      ansible.builtin.set_fact:
+        reachable_devices: "{{ reachable_devices + [item] }}"
+      loop: "{{ groups['netscaler_nodes'] }}"
+      when: hostvars[item].upgrade_reachable | default(false) | bool
+
+    - name: Collect unreachable devices
+      ansible.builtin.set_fact:
+        unreachable_devices: >-
+          {{ unreachable_devices + [hostvars[item].netscaler_hostname ~
+             ' (' ~ hostvars[item].nsip ~ ')'] }}
+      loop: "{{ groups['netscaler_nodes'] }}"
+      when: not (hostvars[item].upgrade_reachable | default(false) | bool)
+
+    - name: Display fleet reachability
+      ansible.builtin.debug:
+        msg: >-
+          Connecting to {{ groups['netscaler_nodes'] | length }} devices:
+          {{ reachable_devices | length }} reachable,
+          {{ unreachable_devices | length }} not reachable.
+          Unreachable devices: {{ unreachable_devices | join(', ') if unreachable_devices | length else 'none' }}.
+
+- name: Upgrade NetScaler HA pairs
+  hosts: netscaler_ha_pairs
+  connection: local
+  gather_facts: false
+  serial: "{{ ha_pairs_parallel | int }}"
+  max_fail_percentage: 100
+  vars_files:
+    - variables.yaml
+  pre_tasks:
+    - name: Initialize pair progress and report data
+      ansible.builtin.set_fact:
+        pair_status: RUNNING
+        pair_error: ""
+        pair_versions: {}
+        pair_started_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        pair_started_epoch: "{{ lookup('pipe', 'date -u +%s') | int }}"
+
+    - name: "STEP 01/12 | {{ pair_name }} | Start"
+      ansible.builtin.debug:
+        msg: >-
+          Starting {{ pair_name }}. Original Primary={{ primary_nsip }},
+          original Secondary={{ secondary_nsip }}.
 
   tasks:
-    - name: Show version
-      shell: "nscli -s -U :{{nitro_user}}:{{nitro_pass}} show version"
-      register: version
+    - name: Execute the ordered HA upgrade
+      block:
+        - name: "STEP 02/12 | {{ pair_name }} | Confirm both devices passed preflight"
+          ansible.builtin.assert:
+            that:
+              - hostvars[primary_host].upgrade_reachable | default(false) | bool
+              - hostvars[secondary_host].upgrade_reachable | default(false) | bool
+            fail_msg: >-
+              Pair blocked because one or both devices failed preflight:
+              {{ primary_host }}={{ hostvars[primary_host].upgrade_reachable | default(false) }},
+              {{ secondary_host }}={{ hostvars[secondary_host].upgrade_reachable | default(false) }}.
 
-    - name: version result
-      debug:
-        msg: "{{ version[\"stdout_lines\"][0] | regex_replace(': Build ','-') | regex_replace('.nc.*$', '') | regex_replace('^.*NS', '') }}"
-      register: present_version
+        - name: "STEP 03-05/12 | {{ pair_name }} | Upgrade original Secondary"
+          ansible.builtin.include_tasks: tasks/upgrade_node.yml
+          vars:
+            upgrade_target: "{{ secondary_host }}"
+            upgrade_slot: secondary
+            upgrade_role_label: Original Secondary
+            upgrade_step_range: "03-05"
 
-    - name: debug Message
-      debug:
-        msg: "NetScaler is already at the desired version {{netscaler_target_version}}, skipping the subsequent tasks for the NetScaler {{nsip}}"
-      when: present_version['msg'] == netscaler_target_version
+        - name: "STEP 06/12 | {{ pair_name }} | Fail over to upgraded Secondary"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} force ha failover -force
+          delegate_to: "{{ secondary_host }}"
+          register: first_failover
+          changed_when: true
+          no_log: true
 
-    - name: Copy build file from local machine to the Remote NetScaler
-      ansible.builtin.copy:
-        src: "{{local_build_file_full_path_with_name}}"
-        dest: "{{netscaler_build_location}}"
-      when: ((want_to_copy_build == "yes") or (want_to_copy_build == "YES")) and (present_version['msg'] != netscaler_target_version)
-    
-    - name: Untar the build file in Secondary node
-      shell: "tar -xvzf {{ netscaler_build_location }}{{ netscaler_build_file_name }} -C {{ netscaler_build_location }}"
-      register: tar_output
-      when: present_version['msg'] != netscaler_target_version
+        - name: "STEP 06/12 | {{ pair_name }} | Wait for HA stabilization"
+          ansible.builtin.wait_for:
+            timeout: "{{ ha_stabilization_seconds }}"
+          delegate_to: localhost
 
-    - name: Upgrade build in Secondary node
-      shell: "./installns -Y -n"
-      when: present_version['msg'] != netscaler_target_version
-      args:
-        chdir: "{{ netscaler_build_location }}"
+        - name: "STEP 07-09/12 | {{ pair_name }} | Upgrade original Primary"
+          ansible.builtin.include_tasks: tasks/upgrade_node.yml
+          vars:
+            upgrade_target: "{{ primary_host }}"
+            upgrade_slot: primary
+            upgrade_role_label: Original Primary
+            upgrade_step_range: "07-09"
 
-    - name: Pause
-      when: present_version['msg'] != netscaler_target_version
-      pause:
-        seconds: 30
-    
-    - name: Reset the connection
-      when: present_version['msg'] != netscaler_target_version
-      meta: reset_connection
+        - name: "STEP 10/12 | {{ pair_name }} | Restore original HA roles"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} force ha failover -force
+          delegate_to: "{{ primary_host }}"
+          register: restore_failover
+          changed_when: true
+          no_log: true
 
-    - name: Reboot the Secondary
-      when: present_version['msg'] != netscaler_target_version
-      vars:
-        ansible_remote_tmp: ./
-        ansible_python_interpreter: "{{ local_python_path }}"
-      delegate_to : localhost
-      ansible.builtin.uri:
-        url: "http://{{nsip}}/nitro/v1/config/reboot"
-        method: POST
-        status_code: [200, 201]
-        body_format: json
-        body:
-          reboot:
-            warm: false
-        headers:
-          Content-Type: "application/json"
-          X-NITRO-USER: "{{nitro_user}}"
-          X-NITRO-PASS: "{{nitro_pass}}"
+        - name: "STEP 10/12 | {{ pair_name }} | Wait for final HA stabilization"
+          ansible.builtin.wait_for:
+            timeout: "{{ ha_stabilization_seconds }}"
+          delegate_to: localhost
 
-    - name: Wait for the Secondary to Come-up
-      when: present_version['msg'] != netscaler_target_version
-      wait_for_connection:
-        connect_timeout: 10
-        sleep: 10
-        delay: 180
-        timeout: 900
+        - name: "STEP 11/12 | {{ pair_name }} | Read final HA state from original Primary"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+          delegate_to: "{{ primary_host }}"
+          register: final_primary_ha
+          changed_when: false
+          no_log: true
 
-    - name: Wait for HA sync 
-      when: present_version['msg'] != netscaler_target_version
-      wait_for:
-        timeout: 30
+        - name: "STEP 11/12 | {{ pair_name }} | Read final HA state from original Secondary"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+          delegate_to: "{{ secondary_host }}"
+          register: final_secondary_ha
+          changed_when: false
+          no_log: true
 
-    - name: Show version after Upgrade
-      when: present_version['msg'] != netscaler_target_version
-      shell: "nscli -s -U :{{nitro_user}}:{{nitro_pass}} show version"
-      register: version_res
+        - name: "STEP 12/12 | {{ pair_name }} | Validate versions and restored roles"
+          ansible.builtin.assert:
+            that:
+              - pair_versions.primary.after == netscaler_target_version
+              - pair_versions.secondary.after == netscaler_target_version
+              - final_primary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Primary')
+              - final_secondary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Secondary')
+            fail_msg: "Final validation failed. Versions or original HA roles do not match the requested end state."
+            success_msg: >-
+              {{ pair_name }} completed correctly: both nodes are {{ netscaler_target_version }}
+              and the original Primary/Secondary roles were restored.
 
-    - name: version result after Upgrade
-      when: present_version['msg'] != netscaler_target_version
-      debug:
-        msg: "{{ version_res[\"stdout_lines\"][0] | regex_replace(': Build ','-') | regex_replace('.nc.*$', '') | regex_replace('^.*NS', '') }}"
-      register: final_version
+        - name: Mark pair successful
+          ansible.builtin.set_fact:
+            pair_status: SUCCESS
 
-    - name: Compare the version
-      when: final_version['msg'] == netscaler_target_version
-      debug:
-        msg: "The ugraded version is {{final_version}}"
-      failed_when: final_version['msg'] != netscaler_target_version
+      rescue:
+        - name: Record pair failure
+          ansible.builtin.set_fact:
+            pair_status: FAILED
+            pair_error: >-
+              {{ ansible_failed_task.name | default('Unknown task') }}:
+              {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('No error text returned')) }}
 
-    - name: Force HA failover
-      shell: "nscli -s -U :{{nitro_user}}:{{nitro_pass}} force ha failover -force"
+        - name: Display pair failure
+          ansible.builtin.debug:
+            msg: "FAILED | {{ pair_name }} | {{ pair_error }}"
 
-    - name: Pausing for 60 seconds
-      pause:
-        seconds: 60
+      always:
+        - name: Build pair report record
+          ansible.builtin.set_fact:
+            pair_result:
+              pair: "{{ pair_name }}"
+              status: "{{ pair_status }}"
+              original_primary: "{{ primary_nsip }}"
+              original_secondary: "{{ secondary_nsip }}"
+              target_version: "{{ netscaler_target_version }}"
+              primary_before: "{{ pair_versions.get('primary', {}).get('before', 'unknown') }}"
+              primary_after: "{{ pair_versions.get('primary', {}).get('after', 'unknown') }}"
+              secondary_before: "{{ pair_versions.get('secondary', {}).get('before', 'unknown') }}"
+              secondary_after: "{{ pair_versions.get('secondary', {}).get('after', 'unknown') }}"
+              started_at: "{{ pair_started_at }}"
+              ended_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+              duration_seconds: "{{ (lookup('pipe', 'date -u +%s') | int) - (pair_started_epoch | int) }}"
+              error: "{{ pair_error }}"
 
+        - name: Display pair completion
+          ansible.builtin.debug:
+            msg: >-
+              {{ pair_status }} | {{ pair_name }} | Primary
+              {{ pair_result.primary_before }} -> {{ pair_result.primary_after }};
+              Secondary {{ pair_result.secondary_before }} -> {{ pair_result.secondary_after }};
+              duration {{ pair_result.duration_seconds }} seconds.
 
-- hosts: primary_netscaler
-  remote_user: "{{ nitro_user }}"
-  connection: citrix.adc.ssh_citrix_adc
-  gather_facts: False
-  vars_files: variables.yaml
-
-  vars:
-    ansible_python_interpreter: '{{ netscaler_python_path | default("/var/python/bin/python") }}'
-
+- name: Write final reports and validate the complete run
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - variables.yaml
   tasks:
-    - name: Show version
-      shell: "nscli -s -U :{{nitro_user}}:{{nitro_pass}} show version"
-      register: version
+    - name: Initialize aggregate results
+      ansible.builtin.set_fact:
+        upgrade_results: []
 
-    - name: version result
-      debug:
-        msg: "{{ version[\"stdout_lines\"][0] | regex_replace(': Build ','-') | regex_replace('.nc.*$', '') | regex_replace('^.*NS', '') }}"
-      register: present_version
+    - name: Collect every pair result
+      ansible.builtin.set_fact:
+        upgrade_results: "{{ upgrade_results + [hostvars[item].pair_result] }}"
+      loop: "{{ groups['netscaler_ha_pairs'] }}"
 
-    - name: debug Message
-      debug:
-        msg: "NetScaler is already at the desired version {{netscaler_target_version}}, skipping the subsequent tasks for the NetScaler {{nsip}}"
-      when: present_version['msg'] == netscaler_target_version
+    - name: Calculate final counts
+      ansible.builtin.set_fact:
+        successful_pairs: "{{ upgrade_results | selectattr('status', 'equalto', 'SUCCESS') | list }}"
+        failed_pairs: "{{ upgrade_results | rejectattr('status', 'equalto', 'SUCCESS') | list }}"
+        upgrade_run_ended: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        upgrade_run_duration: >-
+          {{ (lookup('pipe', 'date -u +%s') | int) - (upgrade_run_started_epoch | int) }}
 
-    - name: Copy build file from local machine to the Remote NetScaler
+    - name: Write JSON upgrade report
       ansible.builtin.copy:
-        src: "{{local_build_file_full_path_with_name}}"
-        dest: "{{netscaler_build_location}}"
-      when: ((want_to_copy_build == "yes") or (want_to_copy_build == "YES")) and (present_version['msg'] != netscaler_target_version)
-    
-    - name: Untar the build file in Old Primary node
-      shell: "tar -xvzf {{ netscaler_build_location }}{{ netscaler_build_file_name }} -C {{ netscaler_build_location }}"
-      register: tar_output
-      when: present_version['msg'] != netscaler_target_version
+        dest: "{{ report_directory }}/upgrade-{{ upgrade_run_id }}.json"
+        mode: "0600"
+        content: >-
+          {{ {'run_id': upgrade_run_id,
+              'started_at': upgrade_run_started,
+              'ended_at': upgrade_run_ended,
+              'duration_seconds': upgrade_run_duration | int,
+              'target_version': netscaler_target_version,
+              'parallel_pairs': ha_pairs_parallel | int,
+              'successful_pairs': successful_pairs | length,
+              'failed_pairs': failed_pairs | length,
+              'results': upgrade_results} | to_nice_json }}
 
-    - name: Upgrade build in Old Primary node
-      shell: "./installns -Y -n"
-      when: present_version['msg'] != netscaler_target_version
-      args:
-        chdir: "{{ netscaler_build_location }}"
+    - name: Write Markdown upgrade report
+      ansible.builtin.template:
+        src: templates/upgrade_report.md.j2
+        dest: "{{ report_directory }}/upgrade-{{ upgrade_run_id }}.md"
+        mode: "0600"
 
-    - name: Pause
-      when: present_version['msg'] != netscaler_target_version
-      pause:
-        seconds: 30
-    
-    - name: Reset the connection
-      when: present_version['msg'] != netscaler_target_version
-      meta: reset_connection
+    - name: Display final run result
+      ansible.builtin.debug:
+        msg: >-
+          Upgrade finished: {{ successful_pairs | length }}/{{ upgrade_results | length }} pairs succeeded,
+          {{ failed_pairs | length }} failed. Reports:
+          {{ report_directory }}/upgrade-{{ upgrade_run_id }}.json and
+          {{ report_directory }}/upgrade-{{ upgrade_run_id }}.md
 
-    - name: Reboot the Old Primary
-      when: present_version['msg'] != netscaler_target_version
-      vars:
-        ansible_remote_tmp: ./
-        ansible_python_interpreter: "{{ local_python_path }}"
-      delegate_to : localhost
-      ansible.builtin.uri:
-        url: "http://{{nsip}}/nitro/v1/config/reboot"
-        method: POST
-        status_code: [200, 201]
-        body_format: json
-        body:
-          reboot:
-            warm: false
-        headers:
-          Content-Type: "application/json"
-          X-NITRO-USER: "{{nitro_user}}"
-          X-NITRO-PASS: "{{nitro_pass}}"
-
-    - name: Wait for the Old Primary to Come-up
-      when: present_version['msg'] != netscaler_target_version
-      wait_for_connection:
-        connect_timeout: 10
-        sleep: 10
-        delay: 180
-        timeout: 900
-
-    - name: Wait for HA sync 
-      when: present_version['msg'] != netscaler_target_version
-      wait_for:
-        timeout: 30
-
-    - name: Show version after Upgrade
-      when: present_version['msg'] != netscaler_target_version
-      shell: "nscli -s -U :{{nitro_user}}:{{nitro_pass}} show version"
-      register: version_res
-
-    - name: version result after Upgrade
-      when: present_version['msg'] != netscaler_target_version
-      debug:
-        msg: "{{ version_res[\"stdout_lines\"][0] | regex_replace(': Build ','-') | regex_replace('.nc.*$', '') | regex_replace('^.*NS', '') }}"
-      register: final_version
-
-    - name: Compare the version
-      when: final_version['msg'] == netscaler_target_version
-      debug:
-        msg: "The ugraded version is {{final_version}}"
-      failed_when: final_version['msg'] != netscaler_target_version
-
-    - name: Force HA failover
-      shell: "nscli -s -U :{{nitro_user}}:{{nitro_pass}} force ha failover -force"
-
+    - name: Return a failing exit code if any pair did not complete correctly
+      ansible.builtin.assert:
+        that:
+          - failed_pairs | length == 0
+        success_msg: "SUCCESS: every HA pair passed final version and role validation."
+        fail_msg: "FAILED: one or more HA pairs failed. Review the generated report before retrying."
