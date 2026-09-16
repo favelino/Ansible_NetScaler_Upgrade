@@ -1,0 +1,496 @@
+---
+- name: Discover HA pairs and initialize firmware preparation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - variables.yaml
+    - group_vars/all/main.yml
+  tasks:
+    - name: Load the encrypted local Vault when present
+      ansible.builtin.include_vars:
+        file: group_vars/all/vault.yml
+      when: query('ansible.builtin.fileglob', 'group_vars/all/vault.yml') | length > 0
+      no_log: true
+
+    - name: Resolve Console credentials without displaying them
+      ansible.builtin.set_fact:
+        prep_console_user: >-
+          {{ vault_console_user | default(lookup('env', 'NETSCALER_CONSOLE_USER'), true) }}
+        prep_console_pass: >-
+          {{ vault_console_pass | default(lookup('env', 'NETSCALER_CONSOLE_PASS'), true) }}
+      no_log: true
+
+    - name: Validate preparation configuration
+      ansible.builtin.assert:
+        that:
+          - >-
+            (prep_inventory_input_json | length > 0) or
+            (netscaler_console_url | length > 0 and
+             netscaler_console_url != 'https://console.example.com' and
+             prep_console_user | length > 0 and
+             prep_console_pass | length > 0)
+          - prep_devices_parallel | int > 0
+          - minimum_var_free_gb | int >= 5
+          - vault_nitro_user | default('') | length > 0
+          - vault_nitro_pass | default('') | length > 0
+        fail_msg: >-
+          Configure the real Console URL, Console credentials, positive concurrency,
+          and a /var threshold of at least 5 GB before preparation.
+      no_log: true
+
+    - name: Find the local NetScaler firmware archive
+      ansible.builtin.find:
+        paths: "{{ firmware_local_directory }}"
+        recurse: false
+        file_type: file
+        patterns:
+          - "*.tgz"
+          - "*.tar.gz"
+      register: prep_firmware_files
+
+    - name: Require exactly one firmware archive
+      ansible.builtin.assert:
+        that:
+          - prep_firmware_files.matched | int == 1
+        fail_msg: >-
+          Place exactly one .tgz or .tar.gz firmware archive in
+          {{ firmware_local_directory }}/. Found {{ prep_firmware_files.matched }}.
+
+    - name: Record local firmware path
+      ansible.builtin.set_fact:
+        prep_firmware_path: "{{ prep_firmware_files.files[0].path }}"
+        prep_firmware_name: "{{ prep_firmware_files.files[0].path | basename }}"
+        prep_remote_archive: >-
+          {{ firmware_remote_directory | regex_replace('/$', '') }}/{{ prep_firmware_files.files[0].path | basename }}
+        prep_inventory_metadata: ".inventory.prep.json"
+        prep_run_id: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+        prep_started_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        prep_started_epoch: "{{ lookup('pipe', 'date -u +%s') | int }}"
+
+    - name: Calculate the local firmware SHA-256
+      ansible.builtin.stat:
+        path: "{{ prep_firmware_path }}"
+        checksum_algorithm: sha256
+      register: prep_local_firmware
+
+    - name: Inspect firmware archive contents
+      ansible.builtin.command:
+        argv:
+          - tar
+          - -tzf
+          - "{{ prep_firmware_path }}"
+      register: prep_archive_members
+      changed_when: false
+
+    - name: Locate installns inside the archive
+      ansible.builtin.set_fact:
+        prep_installns_matches: >-
+          {{ prep_archive_members.stdout_lines
+             | select('match', '(^|.*/)installns$')
+             | list }}
+
+    - name: Require one unambiguous installns entry
+      ansible.builtin.assert:
+        that:
+          - prep_installns_matches | length == 1
+        fail_msg: >-
+          The firmware archive must contain exactly one installns file.
+          Found {{ prep_installns_matches | length }}.
+
+    - name: Record the extracted installns location
+      ansible.builtin.set_fact:
+        prep_installns_relative: "{{ prep_installns_matches[0] | regex_replace('^\\./', '') }}"
+        prep_remote_installns: >-
+          {{ firmware_remote_directory | regex_replace('/$', '') }}/{{ prep_installns_matches[0] | regex_replace('^\\./', '') }}
+        prep_remote_marker: >-
+          {{ firmware_remote_directory | regex_replace('/$', '') }}/.ansible_firmware_{{ prep_local_firmware.stat.checksum }}.ready
+
+    - name: Build Console inventory generator arguments
+      ansible.builtin.set_fact:
+        prep_generator_argv: >-
+          {{ [ansible_playbook_python, 'generate_netscaler_inventory.py']
+             + (['--input-json', prep_inventory_input_json]
+                if prep_inventory_input_json | length
+                else ['--console-url', netscaler_console_url,
+                      '--console-user', prep_console_user])
+             + ['--output', inventory_output,
+              '--metadata-output', prep_inventory_metadata,
+              '--allow-unhealthy',
+              '--force']
+             + (['--ca-bundle', netscaler_console_ca_bundle]
+                if netscaler_console_ca_bundle | length else [])
+             + (['--insecure'] if netscaler_console_insecure | bool else []) }}
+      no_log: true
+
+    - name: Generate inventory.ini containing every HA pair
+      ansible.builtin.command:
+        argv: "{{ prep_generator_argv }}"
+      environment:
+        NETSCALER_CONSOLE_PASS: "{{ prep_console_pass }}"
+      register: prep_inventory_generation
+      changed_when: true
+      no_log: true
+
+    - name: Read generated inventory metadata
+      ansible.builtin.set_fact:
+        prep_inventory_data: "{{ lookup('file', prep_inventory_metadata) | from_json }}"
+
+    - name: Calculate generated inventory SHA-256
+      ansible.builtin.stat:
+        path: "{{ inventory_output }}"
+        checksum_algorithm: sha256
+      register: prep_inventory_stat
+
+    - name: Add discovered NetScaler hosts to this preparation run
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: >-
+          {{ ['netscaler_nodes']
+             + (['primary_netscaler'] if item.role == 'primary' else [])
+             + (['secondary_netscaler'] if item.role == 'secondary' else []) }}
+        ansible_host: "{{ item.ansible_host }}"
+        nsip: "{{ item.nsip }}"
+        netscaler_hostname: "{{ item.hostname }}"
+        ansible_connection: citrix.adc.ssh_citrix_adc
+        ansible_user: "{{ nitro_user }}"
+        ansible_password: "{{ nitro_pass }}"
+        ansible_python_interpreter: "{{ netscaler_python_path }}"
+        validate_certs: false
+      loop: "{{ prep_inventory_data.nodes }}"
+      loop_control:
+        label: "{{ item.hostname }} ({{ item.nsip }})"
+      no_log: true
+
+    - name: Add discovered HA pair jobs to this preparation run
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups:
+          - netscaler_ha_pairs
+        ansible_connection: local
+        pair_name: "{{ item.pair_name }}"
+        primary_host: "{{ item.primary_host }}"
+        secondary_host: "{{ item.secondary_host }}"
+        primary_nsip: "{{ item.primary_nsip }}"
+        secondary_nsip: "{{ item.secondary_nsip }}"
+      loop: "{{ prep_inventory_data.pairs }}"
+      loop_control:
+        label: "{{ item.pair_name }}"
+
+    - name: Create report directory
+      ansible.builtin.file:
+        path: "{{ report_directory }}"
+        state: directory
+        mode: "0700"
+
+    - name: Announce firmware preparation
+      ansible.builtin.debug:
+        msg: >-
+          PREP | Discovered {{ prep_inventory_data.pairs | length }} HA pairs
+          ({{ prep_inventory_data.nodes | length }} NetScalers). Preparing up to
+          {{ prep_devices_parallel }} devices simultaneously. Firmware={{ prep_firmware_name }},
+          SHA-256={{ prep_local_firmware.stat.checksum }}, remote directory={{ firmware_remote_directory }}.
+
+- name: Check, upload, verify, and extract firmware on every NetScaler
+  hosts: netscaler_nodes
+  gather_facts: false
+  serial: "{{ prep_devices_parallel | int }}"
+  strategy: free
+  ignore_unreachable: true
+  vars_files:
+    - variables.yaml
+  pre_tasks:
+    - name: Initialize device preparation status
+      ansible.builtin.set_fact:
+        prep_status: RUNNING
+        prep_error: ""
+        prep_reachable: false
+        prep_authenticated: false
+        prep_free_kb: 0
+        prep_device_started: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        prep_device_started_epoch: "{{ lookup('pipe', 'date -u +%s') | int }}"
+      delegate_to: localhost
+
+  tasks:
+    - name: Prepare firmware on the device
+      block:
+        - name: "PREP 1/8 | {{ netscaler_hostname }} | Test SSH port"
+          ansible.builtin.wait_for:
+            host: "{{ nsip }}"
+            port: "{{ netscaler_ssh_port }}"
+            connect_timeout: "{{ preflight_connect_timeout }}"
+            timeout: "{{ preflight_connect_timeout }}"
+            state: started
+          delegate_to: localhost
+          register: prep_port_check
+          ignore_errors: true
+          changed_when: false
+
+        - name: Record TCP reachability
+          ansible.builtin.set_fact:
+            prep_reachable: "{{ not (prep_port_check.failed | default(false)) }}"
+          delegate_to: localhost
+
+        - name: Stop this device when TCP/22 is unreachable
+          ansible.builtin.assert:
+            that:
+              - prep_reachable | bool
+            fail_msg: "SSH port 22 is not reachable on {{ netscaler_hostname }} ({{ nsip }})."
+          delegate_to: localhost
+
+        - name: "PREP 2/8 | {{ netscaler_hostname }} | Verify authenticated Ansible connection"
+          ansible.builtin.ping:
+          register: prep_auth_check
+          ignore_unreachable: true
+          ignore_errors: true
+          changed_when: false
+
+        - name: Record authenticated reachability
+          ansible.builtin.set_fact:
+            prep_authenticated: >-
+              {{ not (prep_auth_check.unreachable | default(false))
+                 and not (prep_auth_check.failed | default(false)) }}
+          delegate_to: localhost
+
+        - name: Stop this device when authentication fails
+          ansible.builtin.assert:
+            that:
+              - prep_authenticated | bool
+            fail_msg: "Ansible could not authenticate to {{ netscaler_hostname }} ({{ nsip }})."
+          delegate_to: localhost
+
+        - name: "PREP 3/8 | {{ netscaler_hostname }} | Check free space in /var"
+          ansible.builtin.shell: >-
+            df -Pk /var | tail -1 | awk '{print $4}'
+          register: prep_var_df
+          changed_when: false
+
+        - name: Record /var free space
+          ansible.builtin.set_fact:
+            prep_free_kb: "{{ prep_var_df.stdout | trim | int }}"
+          delegate_to: localhost
+
+        - name: Require at least the configured /var free space
+          ansible.builtin.assert:
+            that:
+              - prep_free_kb | int >= (minimum_var_free_gb | int * 1024 * 1024)
+            fail_msg: >-
+              {{ netscaler_hostname }} ({{ nsip }}) has only
+              {{ ((prep_free_kb | int) / 1024 / 1024) | round(2) }} GB free in /var;
+              at least {{ minimum_var_free_gb }} GB is required.
+          delegate_to: localhost
+
+        - name: "PREP 4/8 | {{ netscaler_hostname }} | Ensure {{ firmware_remote_directory }} exists"
+          ansible.builtin.file:
+            path: "{{ firmware_remote_directory }}"
+            state: directory
+            mode: "0755"
+
+        - name: "PREP 5/8 | {{ netscaler_hostname }} | Upload firmware archive"
+          ansible.builtin.copy:
+            src: "{{ hostvars['localhost'].prep_firmware_path }}"
+            dest: "{{ hostvars['localhost'].prep_remote_archive }}"
+            mode: "0644"
+          register: prep_upload
+
+        - name: "PREP 6/8 | {{ netscaler_hostname }} | Calculate remote SHA-256"
+          ansible.builtin.stat:
+            path: "{{ hostvars['localhost'].prep_remote_archive }}"
+            checksum_algorithm: sha256
+          register: prep_remote_firmware
+
+        - name: Confirm uploaded firmware integrity
+          ansible.builtin.assert:
+            that:
+              - prep_remote_firmware.stat.exists | bool
+              - prep_remote_firmware.stat.checksum == hostvars['localhost'].prep_local_firmware.stat.checksum
+            fail_msg: "Uploaded firmware SHA-256 does not match the controller copy."
+          delegate_to: localhost
+
+        - name: "PREP 7/8 | {{ netscaler_hostname }} | Extract firmware in {{ firmware_remote_directory }}"
+          ansible.builtin.shell: >-
+            tar -xzf {{ hostvars['localhost'].prep_remote_archive | quote }}
+            -C {{ firmware_remote_directory | quote }}
+          register: prep_extract
+
+        - name: "PREP 8/8 | {{ netscaler_hostname }} | Verify extracted installns"
+          ansible.builtin.stat:
+            path: "{{ hostvars['localhost'].prep_remote_installns }}"
+          register: prep_installns
+
+        - name: Confirm extracted installer is usable
+          ansible.builtin.assert:
+            that:
+              - prep_installns.stat.exists | bool
+              - prep_installns.stat.isreg | bool
+            fail_msg: >-
+              installns was not found at {{ hostvars['localhost'].prep_remote_installns }}
+              after extraction.
+          delegate_to: localhost
+
+        - name: Write verified firmware marker
+          ansible.builtin.copy:
+            dest: "{{ hostvars['localhost'].prep_remote_marker }}"
+            mode: "0600"
+            content: |
+              sha256={{ hostvars['localhost'].prep_local_firmware.stat.checksum }}
+              archive={{ hostvars['localhost'].prep_remote_archive }}
+              installns={{ hostvars['localhost'].prep_remote_installns }}
+              prepared_at={{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}
+
+        - name: Mark device prepared
+          ansible.builtin.set_fact:
+            prep_status: PREPARED
+          delegate_to: localhost
+
+      rescue:
+        - name: Classify preparation failure
+          ansible.builtin.set_fact:
+            prep_status: >-
+              {{ 'UNREACHABLE'
+                 if not (prep_reachable | bool) or not (prep_authenticated | bool)
+                 else 'INSUFFICIENT_SPACE'
+                 if (prep_free_kb | int) < (minimum_var_free_gb | int * 1024 * 1024)
+                 else 'FAILED' }}
+            prep_error: >-
+              {{ ansible_failed_task.name | default('Connection or preparation failure') }}:
+              {{ ansible_failed_result.msg
+                 | default(ansible_failed_result.stderr | default('No error text returned')) }}
+          delegate_to: localhost
+
+      always:
+        - name: Build device preparation result
+          ansible.builtin.set_fact:
+            prep_result:
+              hostname: "{{ netscaler_hostname }}"
+              nsip: "{{ nsip }}"
+              status: "{{ prep_status }}"
+              reachable: "{{ prep_reachable }}"
+              authenticated: "{{ prep_authenticated }}"
+              var_free_gb: "{{ ((prep_free_kb | int) / 1024 / 1024) | round(2) }}"
+              firmware: "{{ hostvars['localhost'].prep_firmware_name }}"
+              sha256: "{{ hostvars['localhost'].prep_local_firmware.stat.checksum }}"
+              started_at: "{{ prep_device_started }}"
+              ended_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+              duration_seconds: >-
+                {{ (lookup('pipe', 'date -u +%s') | int) - (prep_device_started_epoch | int) }}
+              error: "{{ prep_error }}"
+          delegate_to: localhost
+
+        - name: Display device preparation result
+          ansible.builtin.debug:
+            msg: >-
+              {{ prep_status }} | {{ netscaler_hostname }} ({{ nsip }}) |
+              /var free={{ ((prep_free_kb | int) / 1024 / 1024) | round(2) }} GB |
+              {{ prep_error if prep_error | length else 'firmware verified and extracted' }}
+          delegate_to: localhost
+
+- name: Write preparation reports and readiness metadata
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - variables.yaml
+  tasks:
+    - name: Initialize aggregate preparation results
+      ansible.builtin.set_fact:
+        prep_results: []
+
+    - name: Collect every NetScaler preparation result
+      ansible.builtin.set_fact:
+        prep_results: >-
+          {{ prep_results + [hostvars[item].prep_result
+             | default({'hostname': hostvars[item].netscaler_hostname | default(item),
+                        'nsip': hostvars[item].nsip | default('unknown'),
+                        'status': 'UNREACHABLE',
+                        'reachable': false,
+                        'authenticated': false,
+                        'var_free_gb': 0,
+                        'firmware': prep_firmware_name,
+                        'sha256': prep_local_firmware.stat.checksum,
+                        'started_at': prep_started_at,
+                        'ended_at': lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ'),
+                        'duration_seconds': 0,
+                        'error': 'No completion record was returned by the device'})] }}
+      loop: "{{ groups['netscaler_nodes'] }}"
+
+    - name: Calculate preparation summary
+      ansible.builtin.set_fact:
+        prepared_devices: "{{ prep_results | selectattr('status', 'equalto', 'PREPARED') | list }}"
+        unreachable_devices: "{{ prep_results | selectattr('status', 'equalto', 'UNREACHABLE') | list }}"
+        low_space_devices: "{{ prep_results | selectattr('status', 'equalto', 'INSUFFICIENT_SPACE') | list }}"
+        failed_upload_devices: >-
+          {{ prep_results
+             | rejectattr('status', 'equalto', 'PREPARED')
+             | rejectattr('status', 'equalto', 'UNREACHABLE')
+             | rejectattr('status', 'equalto', 'INSUFFICIENT_SPACE')
+             | list }}
+        prep_ended_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        prep_duration_seconds: >-
+          {{ (lookup('pipe', 'date -u +%s') | int) - (prep_started_epoch | int) }}
+
+    - name: Write JSON preparation report
+      ansible.builtin.copy:
+        dest: "{{ report_directory }}/prep-{{ prep_run_id }}.json"
+        mode: "0600"
+        content: >-
+          {{ {'run_id': prep_run_id,
+              'started_at': prep_started_at,
+              'ended_at': prep_ended_at,
+              'duration_seconds': prep_duration_seconds | int,
+              'firmware': prep_firmware_name,
+              'firmware_sha256': prep_local_firmware.stat.checksum,
+              'minimum_var_free_gb': minimum_var_free_gb | int,
+              'parallel_devices': prep_devices_parallel | int,
+              'inventory': inventory_output,
+              'total_devices': prep_results | length,
+              'prepared_devices': prepared_devices | length,
+              'unreachable_devices': unreachable_devices | length,
+              'low_space_devices': low_space_devices | length,
+              'failed_upload_devices': failed_upload_devices | length,
+              'results': prep_results} | to_nice_json }}
+
+    - name: Write Markdown preparation report
+      ansible.builtin.template:
+        src: templates/prep_report.md.j2
+        dest: "{{ report_directory }}/prep-{{ prep_run_id }}.md"
+        mode: "0600"
+
+    - name: Write preparation gate metadata
+      ansible.builtin.copy:
+        dest: "{{ prepared_firmware_metadata }}"
+        mode: "0600"
+        content: |
+          ---
+          prepared_firmware_successful: {{ (prepared_devices | length == prep_results | length) | bool | lower }}
+          prepared_firmware_file_name: "{{ prep_firmware_name }}"
+          prepared_firmware_sha256: "{{ prep_local_firmware.stat.checksum }}"
+          prepared_firmware_remote_archive: "{{ prep_remote_archive }}"
+          prepared_firmware_remote_installns: "{{ prep_remote_installns }}"
+          prepared_firmware_remote_marker: "{{ prep_remote_marker }}"
+          prepared_inventory_file: "{{ inventory_output }}"
+          prepared_inventory_sha256: "{{ prep_inventory_stat.stat.checksum }}"
+          prepared_at: "{{ prep_ended_at }}"
+          prepared_device_count: {{ prepared_devices | length }}
+          expected_device_count: {{ prep_results | length }}
+
+    - name: Display preparation summary
+      ansible.builtin.debug:
+        msg: >-
+          Preparation finished: {{ prepared_devices | length }}/{{ prep_results | length }} prepared,
+          {{ unreachable_devices | length }} unreachable,
+          {{ low_space_devices | length }} below {{ minimum_var_free_gb }} GB,
+          {{ failed_upload_devices | length }} upload/extraction failures.
+          Inventory={{ inventory_output }}. Reports={{ report_directory }}/prep-{{ prep_run_id }}.json
+          and {{ report_directory }}/prep-{{ prep_run_id }}.md.
+
+    - name: Confirm every NetScaler is ready for the upgrade stage
+      ansible.builtin.assert:
+        that:
+          - prepared_devices | length == prep_results | length
+        success_msg: >-
+          SUCCESS: inventory.ini contains all HA pairs and firmware was verified and
+          extracted on every NetScaler. The upgrade stage is unlocked.
+        fail_msg: >-
+          PREPARATION FAILED: the actual upgrade is locked. Review unreachable,
+          low-space, and upload/extraction failures in the preparation report.

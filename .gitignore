@@ -17,6 +17,10 @@ firmware/
 *.tgz
 *.tar.gz
 reports/
+prepared_firmware.yml
+new_firmware/*
+!new_firmware/.gitkeep
+.inventory.prep.json
 
 # Editors and operating systems
 .idea/

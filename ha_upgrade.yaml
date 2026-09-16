@@ -5,6 +5,7 @@
   gather_facts: false
   vars_files:
     - variables.yaml
+    - "{{ lookup('ansible.builtin.first_found', {'files': ['prepared_firmware.yml', 'prepared_firmware.yml.example'], 'paths': [playbook_dir]}) }}"
   tasks:
     - name: Validate concurrency and inventory
       ansible.builtin.assert:
@@ -13,6 +14,26 @@
           - groups['netscaler_ha_pairs'] | default([]) | length > 0
           - groups['netscaler_nodes'] | default([]) | length > 0
         fail_msg: "Inventory must contain NetScaler nodes and HA pairs; ha_pairs_parallel must be greater than zero."
+
+    - name: Calculate current inventory SHA-256
+      ansible.builtin.stat:
+        path: "{{ prepared_inventory_file }}"
+        checksum_algorithm: sha256
+      register: perform_inventory_stat
+
+    - name: Enforce successful preparation gate
+      ansible.builtin.assert:
+        that:
+          - prepared_firmware_successful | bool
+          - prepared_device_count | int == expected_device_count | int
+          - perform_inventory_stat.stat.exists | bool
+          - perform_inventory_stat.stat.checksum == prepared_inventory_sha256
+        fail_msg: >-
+          The preparation gate is not valid. Run upgrade_prep.yaml successfully
+          and do not modify inventory.ini between preparation and upgrade.
+        success_msg: >-
+          Preparation gate accepted for {{ prepared_device_count }} devices.
+          Firmware SHA-256={{ prepared_firmware_sha256 }}.
 
     - name: Create run metadata
       ansible.builtin.set_fact:
@@ -40,6 +61,7 @@
   strategy: free
   vars_files:
     - variables.yaml
+    - "{{ lookup('ansible.builtin.first_found', {'files': ['prepared_firmware.yml', 'prepared_firmware.yml.example'], 'paths': [playbook_dir]}) }}"
   tasks:
     - name: "PREFLIGHT | Test SSH connectivity to {{ netscaler_hostname | default(inventory_hostname) }} ({{ nsip }})"
       ansible.builtin.wait_for:
@@ -64,6 +86,7 @@
   gather_facts: false
   vars_files:
     - variables.yaml
+    - "{{ lookup('ansible.builtin.first_found', {'files': ['prepared_firmware.yml', 'prepared_firmware.yml.example'], 'paths': [playbook_dir]}) }}"
   tasks:
     - name: Initialize reachability lists
       ansible.builtin.set_fact:
@@ -100,6 +123,7 @@
   max_fail_percentage: 100
   vars_files:
     - variables.yaml
+    - "{{ lookup('ansible.builtin.first_found', {'files': ['prepared_firmware.yml', 'prepared_firmware.yml.example'], 'paths': [playbook_dir]}) }}"
   pre_tasks:
     - name: Initialize pair progress and report data
       ansible.builtin.set_fact:
@@ -148,6 +172,31 @@
           ansible.builtin.wait_for:
             timeout: "{{ ha_stabilization_seconds }}"
           delegate_to: localhost
+
+        - name: "STEP 02/12 | {{ pair_name }} | Confirm original Primary role is still current"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+          delegate_to: "{{ primary_host }}"
+          register: initial_primary_ha
+          changed_when: false
+          no_log: true
+
+        - name: "STEP 02/12 | {{ pair_name }} | Confirm original Secondary role is still current"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+          delegate_to: "{{ secondary_host }}"
+          register: initial_secondary_ha
+          changed_when: false
+          no_log: true
+
+        - name: "STEP 02/12 | {{ pair_name }} | Reject stale HA role data"
+          ansible.builtin.assert:
+            that:
+              - initial_primary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Primary')
+              - initial_secondary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Secondary')
+            fail_msg: >-
+              Live HA roles no longer match inventory.ini. Run upgrade_prep.yaml again
+              before attempting this pair.
 
         - name: "STEP 07-09/12 | {{ pair_name }} | Upgrade original Primary"
           ansible.builtin.include_tasks: tasks/upgrade_node.yml
@@ -246,6 +295,7 @@
   gather_facts: false
   vars_files:
     - variables.yaml
+    - "{{ lookup('ansible.builtin.first_found', {'files': ['prepared_firmware.yml', 'prepared_firmware.yml.example'], 'paths': [playbook_dir]}) }}"
   tasks:
     - name: Initialize aggregate results
       ansible.builtin.set_fact:
@@ -274,6 +324,8 @@
               'ended_at': upgrade_run_ended,
               'duration_seconds': upgrade_run_duration | int,
               'target_version': netscaler_target_version,
+              'firmware': prepared_firmware_file_name,
+              'firmware_sha256': prepared_firmware_sha256,
               'parallel_pairs': ha_pairs_parallel | int,
               'successful_pairs': successful_pairs | length,
               'failed_pairs': failed_pairs | length,

@@ -25,24 +25,42 @@
 - name: Upgrade node when it is not already at target
   when: node_version_before != netscaler_target_version
   block:
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Copy build to {{ upgrade_role_label }}"
-      ansible.builtin.copy:
-        src: "{{ local_build_file_full_path_with_name }}"
-        dest: "{{ netscaler_build_location }}"
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Verify preparation marker"
+      ansible.builtin.stat:
+        path: "{{ prepared_firmware_remote_marker }}"
       delegate_to: "{{ upgrade_target }}"
-      when: want_to_copy_build | lower == 'yes'
+      register: node_preparation_marker
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Extract build on {{ upgrade_role_label }}"
-      ansible.builtin.shell: >-
-        tar -xvzf {{ netscaler_build_location }}{{ netscaler_build_file_name }}
-        -C {{ netscaler_build_location }}
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Recheck prepared archive SHA-256"
+      ansible.builtin.stat:
+        path: "{{ prepared_firmware_remote_archive }}"
+        checksum_algorithm: sha256
       delegate_to: "{{ upgrade_target }}"
-      register: node_extract
+      register: node_prepared_archive
+
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Verify prepared installns"
+      ansible.builtin.stat:
+        path: "{{ prepared_firmware_remote_installns }}"
+      delegate_to: "{{ upgrade_target }}"
+      register: node_prepared_installns
+
+    - name: Confirm this node passed the preparation stage
+      ansible.builtin.assert:
+        that:
+          - node_preparation_marker.stat.exists | bool
+          - node_prepared_archive.stat.exists | bool
+          - node_prepared_archive.stat.checksum == prepared_firmware_sha256
+          - node_prepared_installns.stat.exists | bool
+          - node_prepared_installns.stat.isreg | bool
+        fail_msg: >-
+          The verified preparation marker or installns is missing on
+          {{ upgrade_role_label }}. Run upgrade_prep.yaml again.
+      delegate_to: localhost
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Run installns on {{ upgrade_role_label }}"
       ansible.builtin.shell:
         cmd: "./installns -Y -n"
-        chdir: "{{ netscaler_build_location }}"
+        chdir: "{{ prepared_firmware_remote_installns | dirname }}"
       delegate_to: "{{ upgrade_target }}"
       async: "{{ upgrade_install_timeout }}"
       poll: "{{ upgrade_poll_interval }}"
@@ -121,4 +139,3 @@
     fail_msg: >-
       {{ upgrade_role_label }} version validation failed: expected
       {{ netscaler_target_version }}, got {{ node_version_after }}.
-

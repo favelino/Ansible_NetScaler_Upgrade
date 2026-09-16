@@ -1,0 +1,42 @@
+# NetScaler Firmware Preparation Report
+
+- Run ID: `{{ prep_run_id }}`
+- Started: {{ prep_started_at }}
+- Finished: {{ prep_ended_at }}
+- Duration: {{ prep_duration_seconds }} seconds
+- Firmware: `{{ prep_firmware_name }}`
+- SHA-256: `{{ prep_local_firmware.stat.checksum }}`
+- Inventory: `{{ inventory_output }}`
+- Minimum `/var` free space: {{ minimum_var_free_gb }} GB
+- Configured concurrency: {{ prep_devices_parallel }} devices
+- Result: **{{ 'SUCCESS' if prepared_devices | length == prep_results | length else 'FAILED' }}**
+
+| Hostname | NSIP | `/var` free | Reachable | Authenticated | Status | Detail |
+|---|---|---:|---|---|---|---|
+{% for result in prep_results %}
+| {{ result.hostname | replace('|', '\\|') }} | {{ result.nsip }} | {{ result.var_free_gb }} GB | {{ result.reachable }} | {{ result.authenticated }} | **{{ result.status }}** | {{ result.error | default('') | replace('\n', ' ') | replace('|', '\\|') }} |
+{% endfor %}
+
+## Exceptions
+
+### Unreachable
+{% for result in unreachable_devices %}
+- {{ result.hostname }} ({{ result.nsip }}): {{ result.error | replace('\n', ' ') }}
+{% else %}
+- None
+{% endfor %}
+
+### Less than {{ minimum_var_free_gb }} GB free in `/var`
+{% for result in low_space_devices %}
+- {{ result.hostname }} ({{ result.nsip }}): {{ result.var_free_gb }} GB free
+{% else %}
+- None
+{% endfor %}
+
+### Upload, checksum, or extraction failures
+{% for result in failed_upload_devices %}
+- {{ result.hostname }} ({{ result.nsip }}): {{ result.error | replace('\n', ' ') }}
+{% else %}
+- None
+{% endfor %}
+

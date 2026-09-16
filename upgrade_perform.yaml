@@ -1,0 +1,5 @@
+---
+# Stage 2 entry point. The maintained upgrade workflow remains in ha_upgrade.yaml
+# for backward compatibility with existing automation.
+- import_playbook: ha_upgrade.yaml
+

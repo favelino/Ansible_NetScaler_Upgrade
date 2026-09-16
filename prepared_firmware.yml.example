@@ -1,0 +1,15 @@
+---
+# Stage 2 loads this only when upgrade_prep.yaml has not produced the real,
+# ignored prepared_firmware.yml. The false gate makes the upgrade fail safely.
+prepared_firmware_successful: false
+prepared_firmware_file_name: "NOT_PREPARED"
+prepared_firmware_sha256: "NOT_PREPARED"
+prepared_firmware_remote_archive: "/var/nsinstall/NOT_PREPARED"
+prepared_firmware_remote_installns: "/var/nsinstall/NOT_PREPARED/installns"
+prepared_firmware_remote_marker: "/var/nsinstall/.ansible_firmware_NOT_PREPARED.ready"
+prepared_inventory_file: "inventory.ini"
+prepared_inventory_sha256: "NOT_PREPARED"
+prepared_at: "NOT_PREPARED"
+prepared_device_count: 0
+expected_device_count: 1
+

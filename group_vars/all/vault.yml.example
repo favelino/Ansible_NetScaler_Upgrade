@@ -4,3 +4,6 @@
 vault_nitro_user: nsroot
 vault_nitro_pass: replace-with-the-real-password
 
+# NetScaler Console credentials used only by upgrade_prep.yaml.
+vault_console_user: automation-api
+vault_console_pass: replace-with-the-console-password

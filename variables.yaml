@@ -1,6 +1,4 @@
-# NetScaler Build Information
-netscaler_build_location: "/var/nsinstall/new_build/" # Location where the build file is already present on the target NetScaler, or where it should be copied to from local machine (Please include the trailing "/")
-netscaler_build_file_name: "build-13.1-49.15_nc_64.tgz"
+# Target version used by the actual upgrade validation.
 netscaler_target_version: "13.1-49.15" # Please input this in the format: "release version-build version" Eg: "13.1-49.15"
 
 # Python path on the target NetScaler
@@ -9,9 +7,20 @@ netscaler_python_path: /var/python/bin/python
 # Python path on the local machine
 local_python_path: /usr/bin/python
 
-# Copy the build file from local to Remote NetScaler
-want_to_copy_build: "no"
-local_build_file_full_path_with_name: "./build-13.1-49.15_nc_64.tgz"
+# NetScaler Console inventory discovery. Replace the URL or override with -e.
+netscaler_console_url: "https://console.example.com"
+netscaler_console_ca_bundle: ""
+netscaler_console_insecure: false
+inventory_output: "inventory.ini"
+# Optional offline fixture used only for testing; leave empty in production.
+prep_inventory_input_json: ""
+
+# Stage 1 firmware preparation
+firmware_local_directory: "new_firmware"
+firmware_remote_directory: "/var/nsinstall"
+prepared_firmware_metadata: "prepared_firmware.yml"
+minimum_var_free_gb: 5
+prep_devices_parallel: 20
 
 # Parallelism: number of complete HA pairs upgraded at the same time.
 # Override at runtime with: -e ha_pairs_parallel=5

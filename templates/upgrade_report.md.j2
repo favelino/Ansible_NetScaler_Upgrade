@@ -5,6 +5,8 @@
 - Finished: {{ upgrade_run_ended }}
 - Duration: {{ upgrade_run_duration }} seconds
 - Target version: `{{ netscaler_target_version }}`
+- Prepared firmware: `{{ prepared_firmware_file_name }}`
+- Firmware SHA-256: `{{ prepared_firmware_sha256 }}`
 - Configured concurrency: {{ ha_pairs_parallel }} HA pairs
 - Result: **{{ 'SUCCESS' if failed_pairs | length == 0 else 'FAILED' }}**
 - Successful pairs: {{ successful_pairs | length }}
@@ -23,4 +25,3 @@
 - **{{ result.pair }}:** {{ result.error | replace('\n', ' ') }}
 {% endfor %}
 {% endif %}
-

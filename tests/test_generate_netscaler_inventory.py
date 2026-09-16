@@ -7,6 +7,7 @@ from generate_netscaler_inventory import (
     InventoryError,
     fetch_instances,
     render_inventory,
+    render_metadata,
     validate_instances,
     write_inventory,
 )
@@ -79,6 +80,13 @@ class InventoryTests(unittest.TestCase):
         self.assertIn("pair_002", output)
         self.assertEqual(output.count(" primary_host="), 2)
 
+    def test_machine_metadata_contains_nodes_and_pairs(self):
+        metadata = json.loads(render_metadata(validate_instances(sample_nodes())))
+        self.assertEqual(len(metadata["nodes"]), 2)
+        self.assertEqual(len(metadata["pairs"]), 1)
+        self.assertEqual(metadata["pairs"][0]["primary_host"], "ns_192_0_2_10")
+        self.assertNotIn("password", json.dumps(metadata).lower())
+
     def test_rejects_role_specific_sync_mismatch(self):
         nodes = sample_nodes()
         nodes[1]["ha_sync"] = "ENABLED"
@@ -90,6 +98,18 @@ class InventoryTests(unittest.TestCase):
         nodes[0]["instance_state"] = "Down"
         with self.assertRaisesRegex(InventoryError, "is not Up"):
             validate_instances(nodes)
+
+    def test_preparation_mode_keeps_down_but_paired_instances(self):
+        nodes = sample_nodes()
+        nodes[0]["instance_state"] = "Down"
+        pairs = validate_instances(nodes, require_healthy=False)
+        self.assertEqual(len(pairs), 1)
+
+    def test_preparation_mode_still_rejects_broken_topology(self):
+        nodes = sample_nodes()
+        nodes[1]["ha_ip_address"] = "192.0.2.99"
+        with self.assertRaisesRegex(InventoryError, "not reciprocal"):
+            validate_instances(nodes, require_healthy=False)
 
     def test_rejects_missing_peer(self):
         with self.assertRaisesRegex(InventoryError, "missing HA peer"):

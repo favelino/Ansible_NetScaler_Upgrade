@@ -100,6 +100,8 @@ def fetch_instances(
 
 def validate_instances(
     instances: Iterable[dict[str, Any]],
+    *,
+    require_healthy: bool = True,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Validate HA health and return sorted (Primary, Secondary) pairs."""
     nodes = list(instances)
@@ -122,13 +124,13 @@ def validate_instances(
 
         if nsip in by_ip:
             raise InventoryError(f"Duplicate ns_ip_address in Console response: {nsip}")
-        if _text(node["instance_state"]).lower() != "up":
+        if require_healthy and _text(node["instance_state"]).lower() != "up":
             raise InventoryError(f"{hostname} ({nsip}) is not Up")
         if _text(node["is_ha_configured"]).lower() not in {"true", "yes", "1"}:
             raise InventoryError(f"{hostname} ({nsip}) is not configured for HA")
         if role not in EXPECTED_SYNC:
             raise InventoryError(f"{hostname} ({nsip}) has invalid HA role {node['ha_master_state']!r}")
-        if sync != EXPECTED_SYNC[role]:
+        if require_healthy and sync != EXPECTED_SYNC[role]:
             raise InventoryError(
                 f"{hostname} ({nsip}) has ha_sync={sync!r}; expected "
                 f"{EXPECTED_SYNC[role]!r} for {role.title()}"
@@ -209,6 +211,38 @@ def render_inventory(pairs: Iterable[tuple[dict[str, Any], dict[str, Any]]]) -> 
     return "\n".join(lines) + "\n"
 
 
+def render_metadata(pairs: Iterable[tuple[dict[str, Any], dict[str, Any]]]) -> str:
+    """Return machine-readable host and pair data for upgrade_prep.yaml."""
+    nodes: list[dict[str, str]] = []
+    pair_records: list[dict[str, str]] = []
+    for index, (primary, secondary) in enumerate(pairs, start=1):
+        aliases: dict[str, str] = {}
+        for role, node in (("primary", primary), ("secondary", secondary)):
+            ip = _text(node["ns_ip_address"])
+            alias = "ns_" + ip.replace(".", "_").replace(":", "_")
+            aliases[role] = alias
+            nodes.append(
+                {
+                    "name": alias,
+                    "ansible_host": ip,
+                    "nsip": ip,
+                    "hostname": _text(node["hostname"]),
+                    "role": role,
+                }
+            )
+        pair_records.append(
+            {
+                "name": f"pair_{index:03d}",
+                "pair_name": f"{_text(primary['hostname'])} / {_text(secondary['hostname'])}",
+                "primary_host": aliases["primary"],
+                "secondary_host": aliases["secondary"],
+                "primary_nsip": _text(primary["ns_ip_address"]),
+                "secondary_nsip": _text(secondary["ns_ip_address"]),
+            }
+        )
+    return json.dumps({"nodes": nodes, "pairs": pair_records}, indent=2, sort_keys=True) + "\n"
+
+
 def write_inventory(path: Path, content: str, *, force: bool = False) -> None:
     path = path.expanduser()
     if path.exists() and not force:
@@ -240,7 +274,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--page-size", type=int, default=100)
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--output", type=Path, default=Path("inventory.ini"))
+    parser.add_argument(
+        "--metadata-output",
+        type=Path,
+        help="Optional machine-readable inventory metadata for upgrade_prep.yaml",
+    )
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--allow-unhealthy",
+        action="store_true",
+        help="Include paired instances that are Down or not synchronized; preparation will report them",
+    )
     args = parser.parse_args(argv)
     if args.page_size < 1:
         parser.error("--page-size must be greater than zero")
@@ -277,9 +321,15 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
             )
 
-        pairs = validate_instances(instances)
+        pairs = validate_instances(instances, require_healthy=not args.allow_unhealthy)
         write_inventory(args.output, render_inventory(pairs), force=args.force)
-        print(f"Wrote {args.output} with {len(pairs)} healthy HA pair(s).")
+        if args.metadata_output:
+            write_inventory(
+                args.metadata_output,
+                render_metadata(pairs),
+                force=args.force,
+            )
+        print(f"Wrote {args.output} with {len(pairs)} validated HA pair(s).")
         return 0
     except (InventoryError, json.JSONDecodeError, OSError, HTTPError, URLError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

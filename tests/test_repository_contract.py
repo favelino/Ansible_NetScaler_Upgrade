@@ -6,6 +6,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositoryContractTests(unittest.TestCase):
+    def test_two_stage_entry_points_exist(self):
+        prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
+        perform = (ROOT / "upgrade_perform.yaml").read_text(encoding="utf-8")
+        self.assertIn("Generate inventory.ini containing every HA pair", prep)
+        self.assertIn("import_playbook: ha_upgrade.yaml", perform)
+
+    def test_preparation_enforces_space_checksum_and_reports(self):
+        prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
+        self.assertIn("minimum_var_free_gb", prep)
+        self.assertIn("checksum_algorithm: sha256", prep)
+        self.assertIn("Write JSON preparation report", prep)
+        self.assertIn("Write Markdown preparation report", prep)
+        self.assertIn("PREPARATION FAILED", prep)
+
+    def test_actual_upgrade_requires_preparation_gate(self):
+        playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
+        node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
+        self.assertIn("Enforce successful preparation gate", playbook)
+        self.assertIn("prepared_inventory_sha256", playbook)
+        self.assertIn("prepared_firmware_remote_marker", node_tasks)
+
     def test_playbook_limits_parallelism_by_pair(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
         self.assertIn("hosts: netscaler_ha_pairs", playbook)
@@ -30,4 +51,3 @@ class RepositoryContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
