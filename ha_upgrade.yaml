@@ -152,27 +152,6 @@
               {{ primary_host }}={{ hostvars[primary_host].upgrade_reachable | default(false) }},
               {{ secondary_host }}={{ hostvars[secondary_host].upgrade_reachable | default(false) }}.
 
-        - name: "STEP 03-05/12 | {{ pair_name }} | Upgrade original Secondary"
-          ansible.builtin.include_tasks: tasks/upgrade_node.yml
-          vars:
-            upgrade_target: "{{ secondary_host }}"
-            upgrade_slot: secondary
-            upgrade_role_label: Original Secondary
-            upgrade_step_range: "03-05"
-
-        - name: "STEP 06/12 | {{ pair_name }} | Fail over to upgraded Secondary"
-          ansible.builtin.shell: >-
-            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} force ha failover -force
-          delegate_to: "{{ secondary_host }}"
-          register: first_failover
-          changed_when: true
-          no_log: true
-
-        - name: "STEP 06/12 | {{ pair_name }} | Wait for HA stabilization"
-          ansible.builtin.wait_for:
-            timeout: "{{ ha_stabilization_seconds }}"
-          delegate_to: localhost
-
         - name: "STEP 02/12 | {{ pair_name }} | Confirm original Primary role is still current"
           ansible.builtin.shell: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
@@ -197,6 +176,53 @@
             fail_msg: >-
               Live HA roles no longer match inventory.ini. Run upgrade_prep.yaml again
               before attempting this pair.
+
+        - name: "STEP 03-05/12 | {{ pair_name }} | Upgrade original Secondary"
+          ansible.builtin.include_tasks: tasks/upgrade_node.yml
+          vars:
+            upgrade_target: "{{ secondary_host }}"
+            upgrade_slot: secondary
+            upgrade_role_label: Original Secondary
+            upgrade_step_range: "03-05"
+
+        - name: "STEP 06/12 | {{ pair_name }} | Fail over to upgraded Secondary"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} force ha failover -force
+          delegate_to: "{{ secondary_host }}"
+          register: first_failover
+          changed_when: true
+          no_log: true
+
+        - name: "STEP 06/12 | {{ pair_name }} | Wait for HA stabilization"
+          ansible.builtin.wait_for:
+            timeout: "{{ ha_stabilization_seconds }}"
+          delegate_to: localhost
+
+
+        - name: "STEP 06/12 | {{ pair_name }} | Confirm original Secondary is now Primary"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+          delegate_to: "{{ secondary_host }}"
+          register: failover_secondary_ha
+          changed_when: false
+          no_log: true
+
+        - name: "STEP 06/12 | {{ pair_name }} | Confirm original Primary is now Secondary"
+          ansible.builtin.shell: >-
+            nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+          delegate_to: "{{ primary_host }}"
+          register: failover_primary_ha
+          changed_when: false
+          no_log: true
+
+        - name: "STEP 06/12 | {{ pair_name }} | Verify failover before upgrading original Primary"
+          ansible.builtin.assert:
+            that:
+              - failover_secondary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Primary')
+              - failover_primary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Secondary')
+            fail_msg: >-
+              Failover did not leave the original Secondary as Primary and the
+              original Primary as Secondary. Stop this pair and inspect HA state.
 
         - name: "STEP 07-09/12 | {{ pair_name }} | Upgrade original Primary"
           ansible.builtin.include_tasks: tasks/upgrade_node.yml

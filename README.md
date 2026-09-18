@@ -18,7 +18,7 @@ backward compatibility. See [HELP.md](HELP.md) for the complete operating runboo
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
-ansible-galaxy collection install git+https://github.com/citrix/citrix-adc-ansible-modules.git#/ansible-collections/adc
+ansible-galaxy collection install netscaler.adc
 ```
 
 Password-based SSH also requires `sshpass` on the Ansible controller.

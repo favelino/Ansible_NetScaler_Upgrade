@@ -3,7 +3,7 @@
 ## 1. Controller prerequisites
 
 - Run from the repository root.
-- Install Ansible and the `citrix.adc` collection described in `README.md`.
+- Install Ansible and the `netscaler.adc` collection described in `README.md`.
 - Install `sshpass` when the NetScalers use password-based SSH.
 - Ensure the controller can reach NetScaler Console and every NSIP on TCP/22 and
   the configured NITRO management protocol.

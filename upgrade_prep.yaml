@@ -152,7 +152,7 @@
         ansible_host: "{{ item.ansible_host }}"
         nsip: "{{ item.nsip }}"
         netscaler_hostname: "{{ item.hostname }}"
-        ansible_connection: citrix.adc.ssh_citrix_adc
+        ansible_connection: netscaler.adc.ssh_netscaler_adc
         ansible_user: "{{ nitro_user }}"
         ansible_password: "{{ nitro_pass }}"
         ansible_python_interpreter: "{{ netscaler_python_path }}"
