@@ -18,7 +18,7 @@ backward compatibility. See [HELP.md](HELP.md) for the complete operating runboo
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
-ansible-galaxy collection install netscaler.adc
+ansible-galaxy collection install 'netscaler.adc:>=2.0.0'
 ```
 
 Password-based SSH also requires `sshpass` on the Ansible controller.
@@ -88,11 +88,21 @@ ansible-playbook upgrade_perform.yaml \
 pair the workflow remains strictly ordered:
 
 1. Verify the preparation gate, inventory checksum, reachability, and live HA roles.
-2. Upgrade and validate the original Secondary.
-3. Fail over to the upgraded Secondary.
-4. Upgrade and validate the original Primary.
-5. Fail back to restore the original roles.
-6. Confirm both versions and both final roles.
+2. Disable and save `haSync` and `haProp` on both nodes with
+   `netscaler.adc.hanode`.
+3. Upgrade and validate the original Secondary.
+4. Fail over to the upgraded Secondary.
+5. Upgrade and validate the original Primary.
+6. Fail back to restore the original roles.
+7. Confirm both versions and both final roles.
+8. Re-enable and save `haSync` and `haProp` on both nodes, then force a final
+   synchronization from the restored original Primary.
+
+The HA controls are restored from the playbook's `always` section, including
+failed pair runs. A restoration failure changes the pair result to `FAILED` and
+is recorded in the final report; it must be corrected manually before another
+upgrade attempt. The final forced synchronization runs only after the complete
+pair upgrade and original-role validation succeed.
 
 Live task names show `STEP 01/12` through `STEP 12/12`. Because NetScaler
 appliances do not provide Ansible's normal async-job directory reliably,
