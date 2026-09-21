@@ -51,6 +51,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("node_install_status.rc | default(1)", node_tasks)
         self.assertGreaterEqual(node_tasks.count("ansible.builtin.raw:"), 10)
         self.assertIn("without remote Python", node_tasks)
+        self.assertIn("Wait for management IP to answer ping", node_tasks)
         self.assertIn("nohup /bin/sh", node_tasks)
         self.assertIn("/var/nsinstall/installns_state", node_tasks)
         self.assertEqual(node_tasks.count("regex_findall"), 2)
