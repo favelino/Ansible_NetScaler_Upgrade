@@ -33,6 +33,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("hosts: netscaler_ha_pairs", playbook)
         self.assertIn('serial: "{{ ha_pairs_parallel | int }}"', playbook)
         self.assertIn("STEP 12/12", playbook)
+        self.assertNotIn("ansible.builtin.shell: >-", playbook)
 
     def test_playbook_writes_reports_before_final_assertion(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
@@ -47,9 +48,9 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("\n      async:", node_tasks)
         self.assertIn("INSTALLNS_STAGED", node_tasks)
         self.assertIn("INSTALLNS_RUNNING", node_tasks)
-        self.assertIn("node_install_status.stdout | default('')", node_tasks)
-        self.assertNotIn("ansible.builtin.raw: |", node_tasks)
-        self.assertGreaterEqual(node_tasks.count("executable: /bin/sh"), 3)
+        self.assertIn("node_install_status.rc | default(1)", node_tasks)
+        self.assertGreaterEqual(node_tasks.count("ansible.builtin.raw:"), 10)
+        self.assertIn("without remote Python", node_tasks)
         self.assertIn("nohup /bin/sh", node_tasks)
         self.assertIn("/var/nsinstall/installns_state", node_tasks)
         self.assertEqual(node_tasks.count("regex_findall"), 2)
