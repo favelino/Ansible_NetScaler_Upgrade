@@ -160,8 +160,8 @@
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Validate completed installns state"
       ansible.builtin.shell:
         cmd: |
-          grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null
-          grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null
+          grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null \
+            && grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null
         executable: /bin/sh
       delegate_to: "{{ upgrade_target }}"
       register: node_installns_state_after
