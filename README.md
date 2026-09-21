@@ -94,8 +94,16 @@ pair the workflow remains strictly ordered:
 5. Fail back to restore the original roles.
 6. Confirm both versions and both final roles.
 
-Live task names show `STEP 01/12` through `STEP 12/12`. `installns` uses async
-polling so long-running installation work continues to produce feedback.
+Live task names show `STEP 01/12` through `STEP 12/12`. Because NetScaler
+appliances do not provide Ansible's normal async-job directory reliably,
+`installns` is launched as a persistent remote process and polled through
+controller-independent PID, log, and return-code files in `/var/tmp`.
+
+Before launching `installns`, Stage 2 inspects
+`/var/nsinstall/installns_state`. If the target image has an `END_TIME`, a
+retry safely resumes at the controlled reboot instead of reinstalling the
+already-staged image. Running versions are parsed from the complete `show
+version` output so login banners or blank leading lines do not hide the result.
 
 The final JSON and Markdown reports contain per-pair before/after versions,
 duration, status, and failure details. The playbook exits non-zero after writing
