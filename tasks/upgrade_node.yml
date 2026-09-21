@@ -78,7 +78,8 @@
           /var/tmp/ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.pid
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Inspect resumable installns state"
-      ansible.builtin.raw: |
+      ansible.builtin.shell:
+        cmd: |
         if grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null \
            && grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null; then
           echo INSTALLNS_STAGED
@@ -90,6 +91,7 @@
         else
           echo INSTALLNS_REQUIRED
         fi
+        executable: /bin/sh
       delegate_to: "{{ upgrade_target }}"
       register: node_installns_state_before
       changed_when: false
@@ -140,7 +142,8 @@
       register: node_install_launch
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Poll installns completion"
-      ansible.builtin.raw: |
+      ansible.builtin.shell:
+        cmd: |
         if [ -f "{{ node_install_rc }}" ]; then
           printf 'RC='
           cat "{{ node_install_rc }}"
@@ -150,6 +153,7 @@
         else
           echo PROCESS_MISSING
         fi
+        executable: /bin/sh
       delegate_to: "{{ upgrade_target }}"
       register: node_install_status
       changed_when: false
@@ -174,9 +178,11 @@
       when: "'INSTALLNS_STAGED' not in (node_installns_state_before.stdout | default(''))"
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Validate completed installns state"
-      ansible.builtin.raw: |
+      ansible.builtin.shell:
+        cmd: |
         grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null \
           && grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null
+        executable: /bin/sh
       delegate_to: "{{ upgrade_target }}"
       register: node_installns_state_after
       changed_when: false
