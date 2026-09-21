@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 
@@ -49,6 +50,10 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("/var/nsinstall/installns_state", node_tasks)
         self.assertEqual(node_tasks.count("regex_findall"), 2)
         self.assertEqual(node_tasks.count("show ns version"), 2)
+        version_pattern = r"(?im)NS([0-9.]+): Build ([0-9.]+)"
+        self.assertEqual(node_tasks.count(version_pattern), 2)
+        sample = "        NetScaler NS14.1: Build 66.54.nc, Date: Feb 24 2026"
+        self.assertEqual(re.findall(version_pattern, sample), [("14.1", "66.54")])
 
     def test_secret_bearing_commands_are_hidden(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
