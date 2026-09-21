@@ -41,6 +41,14 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertLess(json_report, final_assertion)
         self.assertLess(markdown_report, final_assertion)
 
+    def test_node_upgrade_uses_persistent_resume_tracking(self):
+        node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
+        self.assertNotIn("\n      async:", node_tasks)
+        self.assertIn("INSTALLNS_STAGED", node_tasks)
+        self.assertIn("nohup /bin/sh", node_tasks)
+        self.assertIn("/var/nsinstall/installns_state", node_tasks)
+        self.assertEqual(node_tasks.count("regex_findall"), 2)
+
     def test_secret_bearing_commands_are_hidden(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
         node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
