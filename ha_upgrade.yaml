@@ -130,6 +130,8 @@
         pair_status: RUNNING
         pair_error: ""
         pair_versions: {}
+        ha_controls_change_started: false
+        ha_controls_restored: false
         pair_started_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
         pair_started_epoch: "{{ lookup('pipe', 'date -u +%s') | int }}"
 
@@ -176,6 +178,36 @@
             fail_msg: >-
               Live HA roles no longer match inventory.ini. Run upgrade_prep.yaml again
               before attempting this pair.
+
+        - name: "STEP 02/12 | {{ pair_name }} | Mark HA isolation as started"
+          ansible.builtin.set_fact:
+            ha_controls_change_started: true
+
+        - name: "STEP 02/12 | {{ pair_name }} | Disable HA sync and propagation"
+          netscaler.adc.hanode:
+            nsip: "{{ hostvars[item].nsip }}"
+            nitro_user: "{{ nitro_user }}"
+            nitro_pass: "{{ nitro_pass }}"
+            nitro_protocol: "{{ netscaler_management_protocol }}"
+            validate_certs: "{{ netscaler_validate_certs }}"
+            save_config: true
+            state: present
+            id: 0
+            hasync: DISABLED
+            haprop: DISABLED
+          delegate_to: localhost
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          no_log: true
+
+        - name: "STEP 02/12 | {{ pair_name }} | Confirm HA isolation"
+          ansible.builtin.debug:
+            msg: >-
+              HA synchronization and command propagation are disabled and saved
+              on both nodes for the duration of this pair upgrade.
 
         - name: "STEP 03-05/12 | {{ pair_name }} | Upgrade original Secondary"
           ansible.builtin.include_tasks: tasks/upgrade_node.yml
@@ -290,6 +322,79 @@
             msg: "FAILED | {{ pair_name }} | {{ pair_error }}"
 
       always:
+        - name: Restore HA synchronization and command propagation
+          netscaler.adc.hanode:
+            nsip: "{{ hostvars[item].nsip }}"
+            nitro_user: "{{ nitro_user }}"
+            nitro_pass: "{{ nitro_pass }}"
+            nitro_protocol: "{{ netscaler_management_protocol }}"
+            validate_certs: "{{ netscaler_validate_certs }}"
+            save_config: true
+            state: present
+            id: 0
+            hasync: ENABLED
+            haprop: ENABLED
+          delegate_to: localhost
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: ha_restore_results
+          when: ha_controls_change_started | default(false) | bool
+          ignore_errors: true
+          no_log: true
+
+        - name: Record HA controls restoration state
+          ansible.builtin.set_fact:
+            ha_controls_restored: >-
+              {{ not (ha_restore_results.failed | default(false)) }}
+          when: ha_controls_change_started | default(false) | bool
+
+        - name: Mark pair failed when HA controls could not be restored
+          ansible.builtin.set_fact:
+            pair_status: FAILED
+            pair_error: >-
+              {{ (pair_error ~ '; ' if pair_error | length else '') ~
+                 'HA synchronization or command propagation could not be re-enabled on both nodes. Manual recovery is required.' }}
+          when:
+            - ha_controls_change_started | default(false) | bool
+            - not (ha_controls_restored | default(false) | bool)
+
+        - name: Force final HA synchronization from restored original Primary
+          netscaler.adc.hasync:
+            nsip: "{{ hostvars[primary_host].nsip }}"
+            nitro_user: "{{ nitro_user }}"
+            nitro_pass: "{{ nitro_pass }}"
+            nitro_protocol: "{{ netscaler_management_protocol }}"
+            validate_certs: "{{ netscaler_validate_certs }}"
+            force: true
+            save: "YES"
+          delegate_to: localhost
+          register: final_ha_sync
+          when:
+            - pair_status == 'SUCCESS'
+            - ha_controls_restored | default(false) | bool
+          ignore_errors: true
+          no_log: true
+
+        - name: Mark pair failed when final HA synchronization failed
+          ansible.builtin.set_fact:
+            pair_status: FAILED
+            pair_error: >-
+              Final forced HA synchronization failed after haSync and haProp were
+              re-enabled. Inspect both nodes before retrying.
+          when:
+            - final_ha_sync is defined
+            - final_ha_sync.failed | default(false)
+
+        - name: Display restored HA controls
+          ansible.builtin.debug:
+            msg: >-
+              HA synchronization and command propagation were re-enabled and saved
+              on both nodes{{ '; final forced synchronization completed' if pair_status == 'SUCCESS' else '' }}.
+          when: ha_controls_restored | default(false) | bool
+
         - name: Build pair report record
           ansible.builtin.set_fact:
             pair_result:
