@@ -153,7 +153,7 @@
               {{ secondary_host }}={{ hostvars[secondary_host].upgrade_reachable | default(false) }}.
 
         - name: "STEP 02/12 | {{ pair_name }} | Confirm original Primary role is still current"
-          ansible.builtin.shell: >-
+          ansible.builtin.raw: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
           delegate_to: "{{ primary_host }}"
           register: initial_primary_ha
@@ -161,7 +161,7 @@
           no_log: true
 
         - name: "STEP 02/12 | {{ pair_name }} | Confirm original Secondary role is still current"
-          ansible.builtin.shell: >-
+          ansible.builtin.raw: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
           delegate_to: "{{ secondary_host }}"
           register: initial_secondary_ha
@@ -186,7 +186,7 @@
             upgrade_step_range: "03-05"
 
         - name: "STEP 06/12 | {{ pair_name }} | Fail over to upgraded Secondary"
-          ansible.builtin.shell: >-
+          ansible.builtin.raw: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} force ha failover -force
           delegate_to: "{{ secondary_host }}"
           register: first_failover
@@ -200,7 +200,7 @@
 
 
         - name: "STEP 06/12 | {{ pair_name }} | Confirm original Secondary is now Primary"
-          ansible.builtin.shell: >-
+          ansible.builtin.raw: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
           delegate_to: "{{ secondary_host }}"
           register: failover_secondary_ha
@@ -208,7 +208,7 @@
           no_log: true
 
         - name: "STEP 06/12 | {{ pair_name }} | Confirm original Primary is now Secondary"
-          ansible.builtin.shell: >-
+          ansible.builtin.raw: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
           delegate_to: "{{ primary_host }}"
           register: failover_primary_ha
@@ -233,7 +233,7 @@
             upgrade_step_range: "07-09"
 
         - name: "STEP 10/12 | {{ pair_name }} | Restore original HA roles"
-          ansible.builtin.shell: >-
+          ansible.builtin.raw: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} force ha failover -force
           delegate_to: "{{ primary_host }}"
           register: restore_failover
@@ -246,7 +246,7 @@
           delegate_to: localhost
 
         - name: "STEP 11/12 | {{ pair_name }} | Read final HA state from original Primary"
-          ansible.builtin.shell: >-
+          ansible.builtin.raw: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
           delegate_to: "{{ primary_host }}"
           register: final_primary_ha
@@ -254,7 +254,7 @@
           no_log: true
 
         - name: "STEP 11/12 | {{ pair_name }} | Read final HA state from original Secondary"
-          ansible.builtin.shell: >-
+          ansible.builtin.raw: >-
             nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
           delegate_to: "{{ secondary_host }}"
           register: final_secondary_ha
