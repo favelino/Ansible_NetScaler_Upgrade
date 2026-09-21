@@ -7,13 +7,24 @@
   changed_when: false
   no_log: true
 
-- name: Parse current version
+- name: Find current version in complete command output
+  ansible.builtin.set_fact:
+    node_version_before_matches: >-
+      {{ node_version_before_raw.stdout
+         | regex_findall('(?im)NS\\s*([0-9]+(?:\\.[0-9]+)*):\\s*Build\\s*([0-9]+(?:\\.[0-9]+)*)') }}
+
+- name: Validate current version output
+  ansible.builtin.assert:
+    that:
+      - node_version_before_matches | length > 0
+    fail_msg: >-
+      Could not parse the running version reported by {{ upgrade_role_label }}.
+      No disruptive action was taken.
+
+- name: Set current version
   ansible.builtin.set_fact:
     node_version_before: >-
-      {{ node_version_before_raw.stdout_lines[0]
-         | regex_replace(': Build ', '-')
-         | regex_replace('.nc.*$', '')
-         | regex_replace('^.*NS', '') }}
+      {{ node_version_before_matches[0][0] ~ '-' ~ node_version_before_matches[0][1] }}
 
 - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Show {{ upgrade_role_label }} plan"
   ansible.builtin.debug:
@@ -57,14 +68,104 @@
           {{ upgrade_role_label }}. Run upgrade_prep.yaml again.
       delegate_to: localhost
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Run installns on {{ upgrade_role_label }}"
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Inspect completed installns state"
       ansible.builtin.shell:
-        cmd: "./installns -Y -n"
+        cmd: |
+          if grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null \
+             && grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null; then
+            echo INSTALLNS_STAGED
+          else
+            echo INSTALLNS_REQUIRED
+          fi
+        executable: /bin/sh
+      delegate_to: "{{ upgrade_target }}"
+      register: node_installns_state_before
+      changed_when: false
+
+    - name: Set persistent installns tracking paths
+      ansible.builtin.set_fact:
+        node_install_log: >-
+          /var/tmp/ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.log
+        node_install_rc: >-
+          /var/tmp/ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.rc
+        node_install_pid: >-
+          /var/tmp/ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.pid
+
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Show safe resume decision"
+      ansible.builtin.debug:
+        msg: >-
+          {{ upgrade_role_label }} installns for {{ netscaler_target_version }}
+          {{ 'already completed; the playbook will continue at the controlled reboot.'
+             if 'INSTALLNS_STAGED' in node_installns_state_before.stdout
+             else 'must run; progress will be polled from persistent files on the appliance.' }}
+
+    - name: Remove stale installns tracking files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ node_install_log }}"
+        - "{{ node_install_rc }}"
+        - "{{ node_install_pid }}"
+      delegate_to: "{{ upgrade_target }}"
+      when: "'INSTALLNS_STAGED' not in node_installns_state_before.stdout"
+
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Start installns on {{ upgrade_role_label }}"
+      ansible.builtin.shell:
+        cmd: >-
+          nohup /bin/sh -c
+          {{ ('./installns -Y -n > ' ~ node_install_log ~ ' 2>&1; rc=$?; echo $rc > ' ~ node_install_rc) | quote }}
+          </dev/null >/dev/null 2>&1 &
+          echo $! > {{ node_install_pid | quote }}
         chdir: "{{ prepared_firmware_remote_installns | dirname }}"
       delegate_to: "{{ upgrade_target }}"
-      async: "{{ upgrade_install_timeout }}"
-      poll: "{{ upgrade_poll_interval }}"
-      register: node_install
+      when: "'INSTALLNS_STAGED' not in node_installns_state_before.stdout"
+      register: node_install_launch
+
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Poll installns completion"
+      ansible.builtin.shell:
+        cmd: |
+          if [ -f "{{ node_install_rc }}" ]; then
+            printf 'RC='
+            cat "{{ node_install_rc }}"
+          elif [ -f "{{ node_install_pid }}" ] \
+               && kill -0 "$(cat "{{ node_install_pid }}")" 2>/dev/null; then
+            echo RUNNING
+          else
+            echo PROCESS_MISSING
+          fi
+        executable: /bin/sh
+      delegate_to: "{{ upgrade_target }}"
+      register: node_install_status
+      changed_when: false
+      failed_when: false
+      until: >-
+        'RC=' in node_install_status.stdout or
+        'PROCESS_MISSING' in node_install_status.stdout
+      retries: >-
+        {{ ((upgrade_install_timeout | int) / (upgrade_poll_interval | int))
+           | round(0, 'ceil') | int }}
+      delay: "{{ upgrade_poll_interval | int }}"
+      when: "'INSTALLNS_STAGED' not in node_installns_state_before.stdout"
+
+    - name: Confirm installns returned successfully
+      ansible.builtin.assert:
+        that:
+          - "'RC=0' in node_install_status.stdout"
+        fail_msg: >-
+          installns did not finish successfully on {{ upgrade_role_label }}.
+          Inspect {{ node_install_log }} on {{ hostvars[upgrade_target].nsip }}.
+      when: "'INSTALLNS_STAGED' not in node_installns_state_before.stdout"
+
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Validate completed installns state"
+      ansible.builtin.shell:
+        cmd: |
+          grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null
+          grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null
+        executable: /bin/sh
+      delegate_to: "{{ upgrade_target }}"
+      register: node_installns_state_after
+      changed_when: false
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Reboot {{ upgrade_role_label }}"
       ansible.builtin.uri:
@@ -114,13 +215,24 @@
   changed_when: false
   no_log: true
 
-- name: Parse final version
+- name: Find final version in complete command output
+  ansible.builtin.set_fact:
+    node_version_after_matches: >-
+      {{ node_version_after_raw.stdout
+         | regex_findall('(?im)NS\\s*([0-9]+(?:\\.[0-9]+)*):\\s*Build\\s*([0-9]+(?:\\.[0-9]+)*)') }}
+
+- name: Validate final version output
+  ansible.builtin.assert:
+    that:
+      - node_version_after_matches | length > 0
+    fail_msg: >-
+      Could not parse the version reported after reboot by
+      {{ upgrade_role_label }}.
+
+- name: Set final version
   ansible.builtin.set_fact:
     node_version_after: >-
-      {{ node_version_after_raw.stdout_lines[0]
-         | regex_replace(': Build ', '-')
-         | regex_replace('.nc.*$', '')
-         | regex_replace('^.*NS', '') }}
+      {{ node_version_after_matches[0][0] ~ '-' ~ node_version_after_matches[0][1] }}
 
 - name: Record node versions in the pair report
   ansible.builtin.set_fact:
