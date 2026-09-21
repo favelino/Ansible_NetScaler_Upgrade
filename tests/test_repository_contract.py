@@ -35,6 +35,24 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("STEP 12/12", playbook)
         self.assertNotIn("ansible.builtin.shell: >-", playbook)
 
+    def test_playbook_isolates_and_restores_ha_controls(self):
+        playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
+        disable = playbook.index("Disable HA sync and propagation")
+        upgrade_secondary = playbook.index("Upgrade original Secondary")
+        restore = playbook.index("Restore HA synchronization and command propagation")
+        report = playbook.index("Build pair report record")
+        self.assertLess(disable, upgrade_secondary)
+        self.assertLess(restore, report)
+        self.assertEqual(playbook.count("netscaler.adc.hanode:"), 2)
+        self.assertIn("hasync: DISABLED", playbook)
+        self.assertIn("haprop: DISABLED", playbook)
+        self.assertIn("hasync: ENABLED", playbook)
+        self.assertIn("haprop: ENABLED", playbook)
+        self.assertIn("save_config: true", playbook)
+        self.assertIn("netscaler.adc.hasync:", playbook)
+        self.assertIn('save: "YES"', playbook)
+        self.assertIn("ignore_errors: true", playbook)
+
     def test_playbook_writes_reports_before_final_assertion(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
         json_report = playbook.index("Write JSON upgrade report")
