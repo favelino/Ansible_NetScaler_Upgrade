@@ -48,6 +48,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("nohup /bin/sh", node_tasks)
         self.assertIn("/var/nsinstall/installns_state", node_tasks)
         self.assertEqual(node_tasks.count("regex_findall"), 2)
+        self.assertEqual(node_tasks.count("show ns version"), 2)
 
     def test_secret_bearing_commands_are_hidden(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
