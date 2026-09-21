@@ -100,12 +100,26 @@ During `installns`, the controller polls persistent `.pid`, `.log`, and
 poll messages mean the installer is still running, not that another installer
 was started.
 
-The disruptive sequence is always:
+The ordered sequence for each pair is:
 
 ```text
-original Secondary -> validate -> failover -> original Primary -> validate
--> fail back -> final version and role validation
+validate roles
+-> disable and save haSync/haProp on both nodes
+-> original Secondary upgrade and reboot
+-> failover
+-> original Primary upgrade and reboot
+-> fail back
+-> final version and role validation
+-> enable and save haSync/haProp on both nodes
+-> force final synchronization from the restored original Primary
 ```
+
+The HA settings are changed through the `netscaler.adc.hanode` collection
+module, not through ad-hoc shell commands. The restoration is in an Ansible
+`always` section, so it is attempted even when a pair fails. If either node
+cannot be restored, that pair is marked `FAILED` and the report explicitly
+requires manual recovery. A forced synchronization is performed only after both
+nodes reach the target version and the original HA roles are restored.
 
 ## 8. Confirm completion
 
@@ -114,6 +128,8 @@ Review both files under `reports/upgrade-<UTC-ID>.*`. A pair is successful only 
 - Both NetScalers report `netscaler_target_version`.
 - The original Primary is Primary again.
 - The original Secondary is Secondary again.
+- `haSync` and `haProp` were re-enabled and saved on both nodes.
+- The final forced HA synchronization completed.
 - All commands in the ordered workflow completed.
 
 The final assertion produces a non-zero process exit status when any pair fails,
@@ -124,6 +140,8 @@ but only after the reports are safely written.
 - Never launch Stage 2 after a failed or partial Stage 1.
 - Rerun Stage 1 after changing firmware, inventory, Console topology, or HA roles.
 - Review a failed pair before retrying; do not blindly increase concurrency.
+- If the report says HA control restoration failed, manually verify and restore
+  `haSync ENABLED` and `haProp ENABLED` on both nodes before retrying.
 - A retry checks `/var/nsinstall/installns_state`. When it contains the target
   `VERSION` and `END_TIME`, the playbook does not run `installns` again; it
   resumes with the controlled reboot and post-boot validation.
