@@ -11,7 +11,7 @@
   ansible.builtin.set_fact:
     node_version_before_matches: >-
       {{ node_version_before_raw.stdout
-         | regex_findall('(?im)NS\\s*([0-9]+(?:\\.[0-9]+)*):\\s*Build\\s*([0-9]+(?:\\.[0-9]+)*)') }}
+         | regex_findall('(?im)NS([0-9.]+): Build ([0-9.]+)') }}
 
 - name: Validate current version output
   ansible.builtin.assert:
@@ -219,7 +219,7 @@
   ansible.builtin.set_fact:
     node_version_after_matches: >-
       {{ node_version_after_raw.stdout
-         | regex_findall('(?im)NS\\s*([0-9]+(?:\\.[0-9]+)*):\\s*Build\\s*([0-9]+(?:\\.[0-9]+)*)') }}
+         | regex_findall('(?im)NS([0-9.]+): Build ([0-9.]+)') }}
 
 - name: Validate final version output
   ansible.builtin.assert:
