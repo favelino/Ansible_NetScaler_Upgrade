@@ -68,20 +68,6 @@
           {{ upgrade_role_label }}. Run upgrade_prep.yaml again.
       delegate_to: localhost
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Inspect completed installns state"
-      ansible.builtin.shell:
-        cmd: |
-          if grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null \
-             && grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null; then
-            echo INSTALLNS_STAGED
-          else
-            echo INSTALLNS_REQUIRED
-          fi
-        executable: /bin/sh
-      delegate_to: "{{ upgrade_target }}"
-      register: node_installns_state_before
-      changed_when: false
-
     - name: Set persistent installns tracking paths
       ansible.builtin.set_fact:
         node_install_log: >-
@@ -91,12 +77,43 @@
         node_install_pid: >-
           /var/tmp/ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.pid
 
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Inspect resumable installns state"
+      ansible.builtin.raw: |
+        if grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null \
+           && grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null; then
+          echo INSTALLNS_STAGED
+        elif [ -f "{{ node_install_rc }}" ]; then
+          echo INSTALLNS_TRACKED
+        elif [ -f "{{ node_install_pid }}" ] \
+             && kill -0 "$(cat "{{ node_install_pid }}")" 2>/dev/null; then
+          echo INSTALLNS_RUNNING
+        else
+          echo INSTALLNS_REQUIRED
+        fi
+      delegate_to: "{{ upgrade_target }}"
+      register: node_installns_state_before
+      changed_when: false
+      failed_when: false
+
+    - name: Confirm installns state could be inspected
+      ansible.builtin.assert:
+        that:
+          - >-
+            'INSTALLNS_' in (node_installns_state_before.stdout | default(''))
+        fail_msg: >-
+          Could not inspect persistent installns state on
+          {{ hostvars[upgrade_target].nsip }}. No installer was started.
+
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Show safe resume decision"
       ansible.builtin.debug:
         msg: >-
           {{ upgrade_role_label }} installns for {{ netscaler_target_version }}
-          {{ 'already completed; the playbook will continue at the controlled reboot.'
-             if 'INSTALLNS_STAGED' in node_installns_state_before.stdout
+          {{ 'already completed; continuing at the controlled reboot.'
+             if 'INSTALLNS_STAGED' in (node_installns_state_before.stdout | default(''))
+             else 'is already running; reconnecting to its persistent tracking files.'
+             if 'INSTALLNS_RUNNING' in (node_installns_state_before.stdout | default(''))
+             else 'already has a return code; validating the completed process.'
+             if 'INSTALLNS_TRACKED' in (node_installns_state_before.stdout | default(''))
              else 'must run; progress will be polled from persistent files on the appliance.' }}
 
     - name: Remove stale installns tracking files
@@ -108,7 +125,7 @@
         - "{{ node_install_rc }}"
         - "{{ node_install_pid }}"
       delegate_to: "{{ upgrade_target }}"
-      when: "'INSTALLNS_STAGED' not in node_installns_state_before.stdout"
+      when: "'INSTALLNS_REQUIRED' in (node_installns_state_before.stdout | default(''))"
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Start installns on {{ upgrade_role_label }}"
       ansible.builtin.shell:
@@ -119,50 +136,47 @@
           echo $! > {{ node_install_pid | quote }}
         chdir: "{{ prepared_firmware_remote_installns | dirname }}"
       delegate_to: "{{ upgrade_target }}"
-      when: "'INSTALLNS_STAGED' not in node_installns_state_before.stdout"
+      when: "'INSTALLNS_REQUIRED' in (node_installns_state_before.stdout | default(''))"
       register: node_install_launch
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Poll installns completion"
-      ansible.builtin.shell:
-        cmd: |
-          if [ -f "{{ node_install_rc }}" ]; then
-            printf 'RC='
-            cat "{{ node_install_rc }}"
-          elif [ -f "{{ node_install_pid }}" ] \
-               && kill -0 "$(cat "{{ node_install_pid }}")" 2>/dev/null; then
-            echo RUNNING
-          else
-            echo PROCESS_MISSING
-          fi
-        executable: /bin/sh
+      ansible.builtin.raw: |
+        if [ -f "{{ node_install_rc }}" ]; then
+          printf 'RC='
+          cat "{{ node_install_rc }}"
+        elif [ -f "{{ node_install_pid }}" ] \
+             && kill -0 "$(cat "{{ node_install_pid }}")" 2>/dev/null; then
+          echo RUNNING
+        else
+          echo PROCESS_MISSING
+        fi
       delegate_to: "{{ upgrade_target }}"
       register: node_install_status
       changed_when: false
       failed_when: false
       until: >-
-        'RC=' in node_install_status.stdout or
-        'PROCESS_MISSING' in node_install_status.stdout
+        'RC=' in (node_install_status.stdout | default('')) or
+        'PROCESS_MISSING' in (node_install_status.stdout | default(''))
       retries: >-
         {{ ((upgrade_install_timeout | int) / (upgrade_poll_interval | int))
            | round(0, 'ceil') | int }}
       delay: "{{ upgrade_poll_interval | int }}"
-      when: "'INSTALLNS_STAGED' not in node_installns_state_before.stdout"
+      when: "'INSTALLNS_STAGED' not in (node_installns_state_before.stdout | default(''))"
 
     - name: Confirm installns returned successfully
       ansible.builtin.assert:
         that:
-          - "'RC=0' in node_install_status.stdout"
+          - >-
+            'RC=0' in (node_install_status.stdout | default(''))
         fail_msg: >-
           installns did not finish successfully on {{ upgrade_role_label }}.
           Inspect {{ node_install_log }} on {{ hostvars[upgrade_target].nsip }}.
-      when: "'INSTALLNS_STAGED' not in node_installns_state_before.stdout"
+      when: "'INSTALLNS_STAGED' not in (node_installns_state_before.stdout | default(''))"
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Validate completed installns state"
-      ansible.builtin.shell:
-        cmd: |
-          grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null \
-            && grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null
-        executable: /bin/sh
+      ansible.builtin.raw: |
+        grep -Fqx 'VERSION ns-{{ netscaler_target_version }}.gz' /var/nsinstall/installns_state 2>/dev/null \
+          && grep -q '^END_TIME ' /var/nsinstall/installns_state 2>/dev/null
       delegate_to: "{{ upgrade_target }}"
       register: node_installns_state_after
       changed_when: false
