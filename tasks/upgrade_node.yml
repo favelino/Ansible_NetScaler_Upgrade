@@ -236,6 +236,23 @@
         timeout: "{{ reboot_down_timeout }}"
       delegate_to: localhost
 
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Wait for management IP to answer ping"
+      ansible.builtin.command:
+        argv:
+          - ping
+          - -c
+          - "1"
+          - -W
+          - "2"
+          - "{{ hostvars[upgrade_target].nsip }}"
+      delegate_to: localhost
+      register: node_management_ping
+      changed_when: false
+      until: node_management_ping.rc == 0
+      retries: >-
+        {{ ((reboot_up_timeout | int) / 5) | round(0, 'ceil') | int }}
+      delay: 5
+
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Wait for {{ upgrade_role_label }} SSH to return"
       ansible.builtin.wait_for:
         host: "{{ hostvars[upgrade_target].nsip }}"
