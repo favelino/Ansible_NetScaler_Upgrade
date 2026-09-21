@@ -1,7 +1,7 @@
 ---
 - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Read {{ upgrade_role_label }} version"
   ansible.builtin.shell: >-
-    nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show version
+    nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ns version
   delegate_to: "{{ upgrade_target }}"
   register: node_version_before_raw
   changed_when: false
@@ -209,7 +209,7 @@
 
 - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Read final {{ upgrade_role_label }} version"
   ansible.builtin.shell: >-
-    nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show version
+    nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ns version
   delegate_to: "{{ upgrade_target }}"
   register: node_version_after_raw
   changed_when: false
