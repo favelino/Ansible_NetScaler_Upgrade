@@ -94,6 +94,12 @@ The console displays fleet preflight counts and pair-specific steps. A pair is
 blocked if either NSIP becomes unreachable or if the live roles no longer match
 the inventory created during preparation. Other healthy pairs continue.
 
+During `installns`, the controller polls persistent `.pid`, `.log`, and
+`.rc` files under `/var/tmp`; it does not depend on
+`~/.ansible_async`, which is not reliably available on NetScaler. Repeated
+poll messages mean the installer is still running, not that another installer
+was started.
+
 The disruptive sequence is always:
 
 ```text
@@ -118,4 +124,9 @@ but only after the reports are safely written.
 - Never launch Stage 2 after a failed or partial Stage 1.
 - Rerun Stage 1 after changing firmware, inventory, Console topology, or HA roles.
 - Review a failed pair before retrying; do not blindly increase concurrency.
+- A retry checks `/var/nsinstall/installns_state`. When it contains the target
+  `VERSION` and `END_TIME`, the playbook does not run `installns` again; it
+  resumes with the controlled reboot and post-boot validation.
+- If the state is incomplete, inspect the persistent log named
+  `/var/tmp/ansible-installns-<target>.log` before retrying.
 - Keep the reports for audit and change-control evidence.
