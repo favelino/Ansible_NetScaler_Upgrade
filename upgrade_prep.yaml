@@ -321,10 +321,10 @@
           ansible.builtin.set_fact:
             prep_existing_sha_matches: >-
               {{ prep_existing_archive.stdout | default('')
-                 | regex_findall('(?im)^([0-9a-f]{64})\\r?$') }}
+                 | regex_findall('(?im)^([0-9a-f]{64})(?![0-9a-f])') }}
             prep_upload_required: >-
               {{ (prep_existing_archive.stdout | default('')
-                  | regex_findall('(?im)^([0-9a-f]{64})\\r?$')
+                  | regex_findall('(?im)^([0-9a-f]{64})(?![0-9a-f])')
                   | first | default(''))
                  != hostvars['localhost'].prep_local_firmware.stat.checksum }}
           delegate_to: localhost
@@ -377,7 +377,7 @@
           ansible.builtin.set_fact:
             prep_remote_sha_matches: >-
               {{ prep_remote_firmware.stdout | default('')
-                 | regex_findall('(?im)^([0-9a-f]{64})\\r?$') }}
+                 | regex_findall('(?im)^([0-9a-f]{64})(?![0-9a-f])') }}
           delegate_to: localhost
 
         - name: Confirm uploaded firmware integrity
