@@ -179,6 +179,24 @@
               Live HA roles no longer match inventory.ini. Run upgrade_prep.yaml again
               before attempting this pair.
 
+        - name: "STEP 02/12 | {{ pair_name }} | Validate hanode module and NITRO access"
+          netscaler.adc.hanode:
+            nsip: "{{ hostvars[item].nsip }}"
+            nitro_user: "{{ nitro_user }}"
+            nitro_pass: "{{ nitro_pass }}"
+            nitro_protocol: "{{ netscaler_management_protocol }}"
+            validate_certs: "{{ netscaler_validate_certs }}"
+            state: present
+            id: 0
+          delegate_to: localhost
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          check_mode: true
+          changed_when: false
+
         - name: "STEP 02/12 | {{ pair_name }} | Mark HA isolation as started"
           ansible.builtin.set_fact:
             ha_controls_change_started: true
@@ -201,7 +219,6 @@
             - "{{ secondary_host }}"
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
-          no_log: true
 
         - name: "STEP 02/12 | {{ pair_name }} | Confirm HA isolation"
           ansible.builtin.debug:
@@ -314,7 +331,7 @@
           ansible.builtin.set_fact:
             pair_status: FAILED
             pair_error: >-
-              {{ ansible_failed_task.name | default('Unknown task') }}:
+              {{ ansible_failed_task.action | default('Unknown task') }}:
               {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('No error text returned')) }}
 
         - name: Display pair failure
@@ -343,7 +360,6 @@
           register: ha_restore_results
           when: ha_controls_change_started | default(false) | bool
           ignore_errors: true
-          no_log: true
 
         - name: Record HA controls restoration state
           ansible.builtin.set_fact:
