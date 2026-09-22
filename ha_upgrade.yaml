@@ -412,6 +412,11 @@
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
           register: ha_restore_commands
           when: ha_controls_change_started | default(false) | bool
+          until:
+            - not (ha_restore_commands.unreachable | default(false))
+            - ha_restore_commands.rc | default(1) == 0
+          retries: 12
+          delay: 10
           changed_when: true
           ignore_errors: true
           ignore_unreachable: true
@@ -434,6 +439,12 @@
           failed_when:
             - ha_restore_save_commands.rc != 0
             - "'running configuration has not changed' not in (ha_restore_save_commands.stdout | default('') | lower)"
+          until: >-
+            ha_restore_save_commands.rc | default(1) == 0
+            or 'running configuration has not changed' in
+               (ha_restore_save_commands.stdout | default('') | lower)
+          retries: 12
+          delay: 10
           ignore_errors: true
           ignore_unreachable: true
 
@@ -448,6 +459,173 @@
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
           register: ha_restored_local_controls
           when: ha_controls_change_started | default(false) | bool
+          until:
+            - not (ha_restored_local_controls.unreachable | default(false))
+            - ha_restored_local_controls.rc | default(1) == 0
+            - (ha_restored_local_controls.stdout | default('')) is search('(?im)^\\s*Propagation\\s*:\\s*ENABLED\\s*
+
+        - name: Verify restored HA controls
+          ansible.builtin.assert:
+            that:
+              - (item.stdout | default('')) is search('(?im)^\\s*Sync State\\s*:\\s*(ENABLED|SUCCESS)\\s*$')
+              - (item.stdout | default('')) is search('(?im)^\\s*Propagation\\s*:\\s*ENABLED\\s*$')
+            fail_msg: >-
+              haSync or haProp was not confirmed ENABLED on
+              {{ hostvars[item.item].netscaler_hostname | default(item.item) }}
+              ({{ hostvars[item.item].nsip }}).
+          loop: "{{ ha_restored_local_controls.results | default([]) }}"
+          loop_control:
+            label: "{{ hostvars[item.item].netscaler_hostname | default(item.item) }} ({{ hostvars[item.item].nsip }})"
+          register: ha_restore_verification
+          when: ha_controls_change_started | default(false) | bool
+          ignore_errors: true
+
+        - name: Record HA controls restoration state
+          ansible.builtin.set_fact:
+            ha_controls_restored: >-
+              {{
+                not (ha_restore_connectivity.failed | default(false))
+                and not (ha_restore_connectivity.unreachable | default(false))
+                and not (ha_restore_commands.failed | default(false))
+                and not (ha_restore_commands.unreachable | default(false))
+                and not (ha_restore_save_commands.failed | default(false))
+                and not (ha_restore_save_commands.unreachable | default(false))
+                and not (ha_restored_local_controls.failed | default(false))
+                and not (ha_restored_local_controls.unreachable | default(false))
+                and not (ha_restore_verification.failed | default(false))
+                and (ha_restored_local_controls.results | default([]) | length == 2)
+              }}
+          when: ha_controls_change_started | default(false) | bool
+
+        - name: Mark pair failed when HA controls could not be restored
+          ansible.builtin.set_fact:
+            pair_status: FAILED
+            pair_error: >-
+              {{ (pair_error ~ '; ' if pair_error | length else '') ~
+                 'HA synchronization or command propagation could not be re-enabled on both nodes. Manual recovery is required.' }}
+          when:
+            - ha_controls_change_started | default(false) | bool
+            - not (ha_controls_restored | default(false) | bool)
+
+        - name: Force final HA synchronization from restored original Primary
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc force ha sync
+          delegate_to: "{{ primary_host }}"
+          register: final_ha_sync
+          when:
+            - pair_status == 'SUCCESS'
+            - ha_controls_restored | default(false) | bool
+          changed_when: true
+          ignore_errors: true
+          ignore_unreachable: true
+
+        - name: Mark pair failed when final HA synchronization failed
+          ansible.builtin.set_fact:
+            pair_status: FAILED
+            pair_error: >-
+              Final forced HA synchronization failed after haSync and haProp were
+              re-enabled. Inspect both nodes before retrying.
+          when:
+            - final_ha_sync is defined
+            - final_ha_sync.failed | default(false)
+
+        - name: Display restored HA controls
+          ansible.builtin.debug:
+            msg: >-
+              HA synchronization and command propagation were re-enabled and saved
+              on both nodes{{ '; final forced synchronization completed' if pair_status == 'SUCCESS' else '' }}.
+          when: ha_controls_restored | default(false) | bool
+
+        - name: Build pair report record
+          ansible.builtin.set_fact:
+            pair_result:
+              pair: "{{ pair_name }}"
+              status: "{{ pair_status }}"
+              original_primary: "{{ primary_nsip }}"
+              original_secondary: "{{ secondary_nsip }}"
+              target_version: "{{ netscaler_target_version }}"
+              primary_before: "{{ pair_versions.get('primary', {}).get('before', 'unknown') }}"
+              primary_after: "{{ pair_versions.get('primary', {}).get('after', 'unknown') }}"
+              secondary_before: "{{ pair_versions.get('secondary', {}).get('before', 'unknown') }}"
+              secondary_after: "{{ pair_versions.get('secondary', {}).get('after', 'unknown') }}"
+              started_at: "{{ pair_started_at }}"
+              ended_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+              duration_seconds: "{{ (lookup('pipe', 'date -u +%s') | int) - (pair_started_epoch | int) }}"
+              error: "{{ pair_error }}"
+
+        - name: Display pair completion
+          ansible.builtin.debug:
+            msg: >-
+              {{ pair_status }} | {{ pair_name }} | Primary
+              {{ pair_result.primary_before }} -> {{ pair_result.primary_after }};
+              Secondary {{ pair_result.secondary_before }} -> {{ pair_result.secondary_after }};
+              duration {{ pair_result.duration_seconds }} seconds.
+
+- name: Write final reports and validate the complete run
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - variables.yaml
+    - "{{ lookup('ansible.builtin.first_found', {'files': ['prepared_firmware.yml', 'prepared_firmware.yml.example'], 'paths': [playbook_dir]}) }}"
+  tasks:
+    - name: Initialize aggregate results
+      ansible.builtin.set_fact:
+        upgrade_results: []
+
+    - name: Collect every pair result
+      ansible.builtin.set_fact:
+        upgrade_results: "{{ upgrade_results + [hostvars[item].pair_result] }}"
+      loop: "{{ groups['netscaler_ha_pairs'] }}"
+
+    - name: Calculate final counts
+      ansible.builtin.set_fact:
+        successful_pairs: "{{ upgrade_results | selectattr('status', 'equalto', 'SUCCESS') | list }}"
+        failed_pairs: "{{ upgrade_results | rejectattr('status', 'equalto', 'SUCCESS') | list }}"
+        upgrade_run_ended: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
+        upgrade_run_duration: >-
+          {{ (lookup('pipe', 'date -u +%s') | int) - (upgrade_run_started_epoch | int) }}
+
+    - name: Write JSON upgrade report
+      ansible.builtin.copy:
+        dest: "{{ report_directory }}/upgrade-{{ upgrade_run_id }}.json"
+        mode: "0600"
+        content: >-
+          {{ {'run_id': upgrade_run_id,
+              'started_at': upgrade_run_started,
+              'ended_at': upgrade_run_ended,
+              'duration_seconds': upgrade_run_duration | int,
+              'target_version': netscaler_target_version,
+              'firmware': prepared_firmware_file_name,
+              'firmware_sha256': prepared_firmware_sha256,
+              'parallel_pairs': ha_pairs_parallel | int,
+              'successful_pairs': successful_pairs | length,
+              'failed_pairs': failed_pairs | length,
+              'results': upgrade_results} | to_nice_json }}
+
+    - name: Write Markdown upgrade report
+      ansible.builtin.template:
+        src: templates/upgrade_report.md.j2
+        dest: "{{ report_directory }}/upgrade-{{ upgrade_run_id }}.md"
+        mode: "0600"
+
+    - name: Display final run result
+      ansible.builtin.debug:
+        msg: >-
+          Upgrade finished: {{ successful_pairs | length }}/{{ upgrade_results | length }} pairs succeeded,
+          {{ failed_pairs | length }} failed. Reports:
+          {{ report_directory }}/upgrade-{{ upgrade_run_id }}.json and
+          {{ report_directory }}/upgrade-{{ upgrade_run_id }}.md
+
+    - name: Return a failing exit code if any pair did not complete correctly
+      ansible.builtin.assert:
+        that:
+          - failed_pairs | length == 0
+        success_msg: "SUCCESS: every HA pair passed final version and role validation."
+        fail_msg: "FAILED: one or more HA pairs failed. Review the generated report before retrying."
+)
+          retries: 12
+          delay: 10
           changed_when: false
           ignore_errors: true
           ignore_unreachable: true
