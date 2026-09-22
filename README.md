@@ -1,153 +1,270 @@
 # NetScaler HA fleet upgrade
 
-This repository provides a two-stage Ansible workflow for upgrading large fleets
-of NetScaler HA pairs discovered from NetScaler Console.
+This repository automates staged upgrades for large fleets of NetScaler HA pairs
+discovered from NetScaler Console. It is based on the upstream NetScaler
+Automation Toolkit normal-mode HA upgrade and adds dynamic inventory,
+configurable concurrency, progress messages, preparation gates, resumable
+installation tracking, and JSON/Markdown reports.
 
-1. `upgrade_prep.yaml` discovers HA pairs, creates `inventory.ini`, validates every
-   appliance, uploads and verifies firmware, extracts it under `/var/nsinstall`,
-   and unlocks the upgrade only when every device is ready.
-2. `upgrade_perform.yaml` upgrades multiple HA pairs concurrently while preserving
-   the safe Secondary → failover → original Primary → restore-roles sequence.
+> Read [HELP.md](HELP.md) before the first production run. It contains the
+> complete command-by-command operating and recovery runbook.
 
-The original `ha_upgrade.yaml` remains as the underlying Stage 2 workflow for
-backward compatibility. See [HELP.md](HELP.md) for the complete operating runbook.
+## Workflow
 
-## Install
+| Stage | Entry point | Purpose |
+|---|---|---|
+| 1 — Prepare | `upgrade_prep.yaml` | Discover all HA pairs, generate `inventory.ini`, check SSH and `/var`, upload firmware, verify SHA-256, extract it, and create the preparation gate. |
+| 2 — Upgrade | `upgrade_perform.yaml` | Upgrade complete HA pairs concurrently while keeping the two nodes inside each pair strictly ordered. |
+| Stage 2 implementation | `ha_upgrade.yaml` | Maintained underlying HA workflow imported by `upgrade_perform.yaml`. |
+
+Stage 2 cannot start successfully unless Stage 1 prepared every discovered
+appliance and the generated inventory still matches its recorded SHA-256.
+
+## Requirements
+
+- Ansible controller running Linux.
+- Ansible Core 2.16 or newer.
+- `netscaler.adc` collection 2.19.0 or newer.
+- `sshpass` for password-authenticated SCP.
+- Controller connectivity to NetScaler Console and every NSIP on TCP/22 and the
+  configured NITRO protocol.
+- One supported NetScaler firmware archive.
+- Working HA pairs with known Primary and Secondary roles.
+
+Ubuntu installation:
+
+```bash
+sudo apt update
+sudo apt install -y git python3-venv python3-pip sshpass
+
+ansible --version
+ansible-galaxy collection install 'netscaler.adc:>=2.19.0' --force
+ansible-galaxy collection list netscaler.adc
+```
+
+Using Ubuntu's packaged Ansible is supported when it meets the version
+requirement. A virtual environment is optional:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-ansible-galaxy collection install 'netscaler.adc:>=2.0.0'
+python3 -m pip install --upgrade pip
+python3 -m pip install 'ansible-core>=2.16'
+ansible-galaxy collection install 'netscaler.adc:>=2.19.0'
 ```
 
-Password-based SSH also requires `sshpass` on the Ansible controller.
+Always run `ansible`, `ansible-playbook`, and `ansible-galaxy` as the same
+Linux user so that they use the same configuration and collection paths.
 
-The workflow uses the upstream NetScaler Automation Toolkit normal-mode template
-as its foundation.
+## Secure credentials
 
-## Configure credentials
+Create the encrypted Vault interactively:
 
 ```bash
+mkdir -p group_vars/all
 ansible-vault create group_vars/all/vault.yml
 ```
 
+Enter only YAML content in the editor:
+
 ```yaml
+---
 vault_nitro_user: nsroot
-vault_nitro_pass: "replace-with-the-real-password"
+vault_nitro_pass: "replace-with-the-real-NetScaler-password"
 vault_console_user: automation-api
-vault_console_pass: "replace-with-the-console-password"
+vault_console_pass: "replace-with-the-real-Console-password"
 ```
 
-Passwords never belong in `inventory.ini`. The inventory, preparation metadata,
-reports, Vault file, and firmware archives are excluded from Git.
-
-## Stage 1: prepare all NetScalers
-
-Place exactly one NetScaler `.tgz` or `.tar.gz` archive in `new_firmware/`.
-Set the target version and real Console URL in `variables.yaml`, or override the
-URL at runtime:
+Useful Vault commands:
 
 ```bash
-ansible-playbook upgrade_prep.yaml \
-  --ask-vault-pass \
-  -e netscaler_console_url=https://console.example.org
+ansible-vault view group_vars/all/vault.yml
+ansible-vault edit group_vars/all/vault.yml
+ansible-vault rekey group_vars/all/vault.yml
 ```
 
-Preparation performs the following operations:
+Never commit plaintext credentials, put them in `inventory.ini`, pass them with
+`-e`, or save the Vault password inside this repository. Vault files,
+generated inventory, reports, preparation metadata, and firmware archives are
+excluded from Git.
 
-Preparation does not depend on the appliance's bundled Python runtime. Remote
-authentication, disk checks, checksum, extraction, and validation use raw SSH
-commands. The controller uploads firmware with `sshpass` and legacy-protocol
-`scp -O`, with the Vault password supplied only through the protected
-`SSHPASS` environment and the task output hidden by `no_log`. This supports
-older source releases such as NetScaler 13.1.
+## Configuration
 
-- Queries every Console API page and creates `inventory.ini` with all reciprocal
-  HA pairs, including currently unhealthy pairs so they can be reported.
-- Processes up to `prep_devices_parallel` appliances simultaneously (default 20).
-- Lists TCP-unreachable and authentication-failed NetScalers.
-- Checks `/var` and blocks any device with less than 5 GB free.
-- Uploads the archive from `new_firmware/` to `/var/nsinstall/`.
-- Compares local and remote SHA-256 checksums.
-- Inspects the archive to locate its exact `installns` path, extracts with
-  `tar -xzf`, and verifies that `installns` exists.
-- Writes a verified marker on each prepared appliance.
-- Writes JSON and Markdown reports under `reports/`.
-- Creates `prepared_firmware.yml`, including the firmware and inventory checksums.
+Edit `variables.yaml`. Example for a self-signed lab Console:
 
-Stage 1 returns a non-zero exit code if any device is unreachable, has less than
-5 GB free, or fails upload, checksum, or extraction validation. Stage 2 remains
-locked until all discovered NetScalers are prepared successfully.
+```yaml
+netscaler_target_version: "14.1-73.33"
+netscaler_console_url: "https://10.100.71.200"
+netscaler_console_ca_bundle: ""
+netscaler_console_insecure: true
 
-## Stage 2: perform the HA upgrades
+prep_devices_parallel: 2
+ha_pairs_parallel: 2
+minimum_var_free_gb: 5
 
-After Stage 1 reports success:
+firmware_local_directory: "new_firmware"
+firmware_remote_directory: "/var/nsinstall"
+```
+
+Use a trusted CA bundle and `netscaler_console_insecure: false` in production.
+`prep_devices_parallel` counts individual appliances. `ha_pairs_parallel`
+counts complete HA pairs.
+
+`ansible.cfg` defaults to 50 forks. The forks value must be high enough for the
+selected concurrency.
+
+## Firmware
+
+Place exactly one `.tgz` or `.tar.gz` file in `new_firmware/`:
+
+```bash
+ls -lh new_firmware/
+find new_firmware -maxdepth 1 -type f \
+  \( -name '*.tgz' -o -name '*.tar.gz' \) -print
+sha256sum new_firmware/*
+```
+
+Stage 1 inspects the archive locally, requires exactly one `installns` entry,
+uploads the archive to `/var/nsinstall`, verifies its SHA-256 on the appliance,
+extracts it with `tar -xzf`, verifies the extracted installer, and writes a
+checksum-specific readiness marker.
+
+## Stage 1 — prepare the fleet
+
+Run from the repository root. Do not pass a manually maintained inventory;
+Stage 1 obtains the current topology from Console and generates
+`inventory.ini`.
+
+```bash
+git pull --ff-only
+
+ansible-playbook upgrade_prep.yaml --syntax-check
+
+ansible-playbook upgrade_prep.yaml \
+  --ask-vault-pass \
+  -e prep_devices_parallel=2
+```
+
+The syntax check can warn that `netscaler_nodes` does not exist. That warning
+is expected because syntax checking does not execute the first play that creates
+the dynamic group.
+
+Stage 1 processes appliances in configurable parallel batches and performs:
+
+1. TCP/22 reachability test.
+2. Authenticated raw SSH test.
+3. `/var` free-space check; at least 5 GiB is required.
+4. Creation of `/var/nsinstall`.
+5. Controller-side `scp -O` upload without requiring appliance Python.
+6. Local/remote SHA-256 comparison.
+7. Firmware extraction.
+8. Validation of the extracted `installns` and readiness marker.
+
+Outputs:
+
+- `inventory.ini`
+- `prepared_firmware.yml`
+- `reports/prep-<UTC-ID>.json`
+- `reports/prep-<UTC-ID>.md`
+
+Verify the gate:
+
+```bash
+grep -E \
+  '^(prepared_firmware_successful|prepared_device_count|expected_device_count|prepared_at):' \
+  prepared_firmware.yml
+```
+
+All values must confirm success before Stage 2:
+
+```yaml
+prepared_firmware_successful: true
+prepared_device_count: 6
+expected_device_count: 6
+```
+
+### Silent upload, checksum, and extraction periods
+
+The 1+ GiB upload is intentionally executed with `scp -q` and
+`no_log: true` to prevent credentials from reaching console output. A quiet
+screen during PREP 5/8 does not mean the playbook stopped.
+
+In a second terminal:
+
+```bash
+pgrep -af 'ansible-playbook.*upgrade_prep.yaml'
+
+ps -eo pid,etime,stat,pcpu,pmem,args |
+grep -E '[a]nsible-playbook|[s]cp|[s]shpass'
+
+watch -n 10 'ss -tinp | grep -A2 -E "10\.100\.[0-9]+\.[0-9]+:22"'
+```
+
+Increasing `bytes_sent` confirms progress. After SCP finishes, remote SHA-256
+and extraction can also take several minutes on VPX appliances.
+
+## Stage 2 — upgrade HA pairs
+
+Only after a fully successful preparation:
 
 ```bash
 ansible-playbook upgrade_perform.yaml \
   -i inventory.ini \
   --ask-vault-pass \
-  -e ha_pairs_parallel=5
+  -e ha_pairs_parallel=2
 ```
 
-`ha_pairs_parallel` limits complete HA pairs, not individual nodes. Within every
-pair the workflow remains strictly ordered:
+Two pairs in parallel means up to two independent pair workflows run
+simultaneously. The nodes inside each pair are never upgraded simultaneously.
 
-1. Verify the preparation gate, inventory checksum, reachability, and live HA roles.
-2. Disable and save `haSync` and `haProp` on both nodes with
-   `netscaler.adc.hanode`.
-3. Upgrade and validate the original Secondary.
-4. Fail over to the upgraded Secondary.
-5. Upgrade and validate the original Primary.
-6. Fail back to restore the original roles.
-7. Confirm both versions and both final roles.
-8. Re-enable and save `haSync` and `haProp` on both nodes, then force a final
-   synchronization from the restored original Primary.
+For each pair, Stage 2:
 
-The HA controls are restored from the playbook's `always` section, including
-failed pair runs. A restoration failure changes the pair result to `FAILED` and
-is recorded in the final report; it must be corrected manually before another
-upgrade attempt. The final forced synchronization runs only after the complete
-pair upgrade and original-role validation succeed.
+1. Verifies the preparation gate, inventory SHA-256, SSH reachability, and live
+   HA roles.
+2. Disables and saves `haSync` and `haProp` on both nodes.
+3. Installs and validates the original Secondary.
+4. Reboots it and waits for management IP reachability and target version.
+5. Fails over to the upgraded Secondary and validates both new roles.
+6. Installs, reboots, and validates the original Primary.
+7. Fails back to restore the original roles.
+8. Validates final roles and versions.
+9. Re-enables and saves `haSync` and `haProp` on both nodes.
+10. Forces a final synchronization from the restored original Primary.
 
-Live task names show `STEP 01/12` through `STEP 12/12`. All appliance
-commands, including the `installns` launch, use raw SSH and do not require the
-NetScaler's bundled Python runtime. Because NetScaler appliances do not provide
-Ansible's normal async-job directory reliably, `installns` is launched as a
-persistent remote process and polled through controller-independent PID, log,
-and return-code files in `/var/tmp`.
+HA control restoration is in an Ansible `always` section. A restoration
+failure marks the pair `FAILED` and is included in the report.
 
-Before launching `installns`, Stage 2 inspects
-`/var/nsinstall/installns_state`. If the target image has an `END_TIME`, a
-retry safely resumes at the controlled reboot instead of reinstalling the
-already-staged image. Running versions are parsed from the complete `show
-version` output so login banners or blank leading lines do not hide the result.
+`installns` is launched as a persistent process and tracked with PID, log, and
+return-code files in `/var/tmp`. A safe retry recognizes a completed target
+installation in `/var/nsinstall/installns_state` and continues with the
+controlled reboot instead of reinstalling the image.
 
-The final JSON and Markdown reports contain per-pair before/after versions,
-duration, status, and failure details. The playbook exits non-zero after writing
-the reports if any pair fails.
+## Final validation and reports
 
-## Main configuration
+Stage 2 writes:
 
-```yaml
-netscaler_target_version: "14.1-xx.xx"
-prep_devices_parallel: 20
-ha_pairs_parallel: 2
-minimum_var_free_gb: 5
-firmware_local_directory: new_firmware
-firmware_remote_directory: /var/nsinstall
+- `reports/upgrade-<UTC-ID>.json`
+- `reports/upgrade-<UTC-ID>.md`
+
+The process returns a non-zero exit code after writing the reports if any pair
+fails. A pair is successful only when both nodes run the target version, the
+original HA roles are restored, HA controls are enabled and saved, and final HA
+synchronization succeeds.
+
+```bash
+ls -lt reports/upgrade-* | head
+sed -n '1,240p' reports/upgrade-<UTC-ID>.md
 ```
 
-For 100+ appliances, begin with conservative values, observe controller CPU,
-network throughput, and NetScaler management responsiveness, then increase
-`prep_devices_parallel` or `ha_pairs_parallel`. `ansible.cfg` defaults to 50 forks;
-`--forks` must be high enough for the requested concurrency.
-
-## Validate locally
+## Test the repository
 
 ```bash
 python3 -m unittest -v
 ansible-playbook upgrade_prep.yaml --syntax-check
-ansible-playbook upgrade_perform.yaml -i inventory.ini.example --syntax-check
+ansible-playbook upgrade_perform.yaml \
+  -i inventory.ini.example \
+  --syntax-check
 ```
+
+For operational troubleshooting, snapshot recovery, retry rules, monitoring
+commands, and manual validation, see [HELP.md](HELP.md).
