@@ -609,7 +609,51 @@ The playbook's `always` section re-enables and verifies `haSync` and
 changed` during `save ns config` is treated as a successful idempotent save
 when the subsequent state verification passes.
 
-## 16. Audit evidence
+## 16. SSH resets while restoring HA controls
+
+A Secondary can reset TCP/22 while finishing its controlled reboot. Earlier
+versions of the playbook could reach the `always` recovery block during this
+window and stop with `UNREACHABLE`, even though the reboot itself was normal.
+The current playbook waits up to `reboot_up_timeout` for both SSH ports before
+re-enabling, saving, and verifying `haSync` and `haProp`. An unreachable
+recovery attempt is recorded as a pair failure but no longer prevents the final
+report from being written.
+
+If this occurs on an older checkout, stop that controller run before it starts
+another pair, wait for both nodes, and restore the controls explicitly:
+
+~~~bash
+# First Ctrl+C in the running Ansible terminal, then A to abort.
+
+ansible localhost -c local -m ansible.builtin.wait_for \
+  -a 'host=10.100.48.2 port=22 state=started delay=30 timeout=900'
+
+ansible -i inventory.ini \
+  'ns_10_100_48_1:ns_10_100_48_2' \
+  -m ansible.builtin.raw \
+  -a 'ssh_netscaler_adc set ha node -hasync ENABLED -haprop ENABLED' \
+  --ask-vault-pass
+
+ansible -i inventory.ini \
+  'ns_10_100_48_1:ns_10_100_48_2' \
+  -m ansible.builtin.raw \
+  -a 'ssh_netscaler_adc save ns config' \
+  --ask-vault-pass
+
+ansible -i inventory.ini \
+  'ns_10_100_48_1:ns_10_100_48_2' \
+  -m ansible.builtin.raw \
+  -a 'ssh_netscaler_adc show ha node 0' \
+  --ask-vault-pass
+~~~
+
+Repeat with the affected pair addresses. Require `Propagation: ENABLED` and
+`Sync State: ENABLED` or `SUCCESS` on both nodes. Then check running versions
+and live roles before deciding whether the idempotent upgrade can be resumed.
+Do not force HA synchronization until both nodes are reachable, healthy, and
+running compatible versions.
+
+## 17. Audit evidence
 
 Retain:
 
