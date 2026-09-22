@@ -156,7 +156,7 @@
 
         - name: "STEP 02/12 | {{ pair_name }} | Confirm original Primary role is still current"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+            ssh_netscaler_adc show ha node
           delegate_to: "{{ primary_host }}"
           register: initial_primary_ha
           changed_when: false
@@ -164,7 +164,7 @@
 
         - name: "STEP 02/12 | {{ pair_name }} | Confirm original Secondary role is still current"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+            ssh_netscaler_adc show ha node
           delegate_to: "{{ secondary_host }}"
           register: initial_secondary_ha
           changed_when: false
@@ -219,7 +219,7 @@
 
         - name: "STEP 06/12 | {{ pair_name }} | Fail over to upgraded Secondary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} force ha failover -force
+            ssh_netscaler_adc force ha failover -force
           delegate_to: "{{ secondary_host }}"
           register: first_failover
           changed_when: true
@@ -233,7 +233,7 @@
 
         - name: "STEP 06/12 | {{ pair_name }} | Confirm original Secondary is now Primary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+            ssh_netscaler_adc show ha node
           delegate_to: "{{ secondary_host }}"
           register: failover_secondary_ha
           changed_when: false
@@ -241,7 +241,7 @@
 
         - name: "STEP 06/12 | {{ pair_name }} | Confirm original Primary is now Secondary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+            ssh_netscaler_adc show ha node
           delegate_to: "{{ primary_host }}"
           register: failover_primary_ha
           changed_when: false
@@ -266,7 +266,7 @@
 
         - name: "STEP 10/12 | {{ pair_name }} | Restore original HA roles"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} force ha failover -force
+            ssh_netscaler_adc force ha failover -force
           delegate_to: "{{ primary_host }}"
           register: restore_failover
           changed_when: true
@@ -279,7 +279,7 @@
 
         - name: "STEP 11/12 | {{ pair_name }} | Read final HA state from original Primary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+            ssh_netscaler_adc show ha node
           delegate_to: "{{ primary_host }}"
           register: final_primary_ha
           changed_when: false
@@ -287,7 +287,7 @@
 
         - name: "STEP 11/12 | {{ pair_name }} | Read final HA state from original Secondary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc nscli -s -U :{{ nitro_user }}:{{ nitro_pass }} show ha node
+            ssh_netscaler_adc show ha node
           delegate_to: "{{ secondary_host }}"
           register: final_secondary_ha
           changed_when: false
