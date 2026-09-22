@@ -24,7 +24,7 @@ appliance and the generated inventory still matches its recorded SHA-256.
 
 - Ansible controller running Linux.
 - Ansible Core 2.16 or newer.
-- `netscaler.adc` collection 2.19.0 or newer.
+- `netscaler.adc` collection 2.17.0 or newer.
 - `sshpass` for password-authenticated SCP.
 - Controller connectivity to NetScaler Console and every NSIP on TCP/22 and the
   configured NITRO protocol.
@@ -38,7 +38,7 @@ sudo apt update
 sudo apt install -y git python3-venv python3-pip sshpass
 
 ansible --version
-ansible-galaxy collection install 'netscaler.adc:>=2.19.0' --force
+ansible-galaxy collection install 'netscaler.adc:>=2.17.0' --force
 ansible-galaxy collection list netscaler.adc
 ```
 
@@ -50,7 +50,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
 python3 -m pip install 'ansible-core>=2.16'
-ansible-galaxy collection install 'netscaler.adc:>=2.19.0'
+ansible-galaxy collection install 'netscaler.adc:>=2.17.0'
 ```
 
 Always run `ansible`, `ansible-playbook`, and `ansible-galaxy` as the same
