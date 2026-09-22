@@ -21,6 +21,25 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("Write Markdown preparation report", prep)
         self.assertIn("PREPARATION FAILED", prep)
 
+    def test_device_preparation_does_not_require_remote_python(self):
+        prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
+        device_play = prep.split(
+            "- name: Check, upload, verify, and extract firmware on every NetScaler",
+            1,
+        )[1].split("- name: Write preparation reports and readiness metadata", 1)[0]
+        self.assertNotIn("ansible.builtin.ping:", device_play)
+        self.assertNotIn("ansible.builtin.shell:", device_play)
+        self.assertNotIn("ansible.builtin.file:", device_play)
+        self.assertNotIn("ansible.builtin.copy:", device_play)
+        self.assertNotIn("ansible.builtin.stat:", device_play)
+        self.assertGreaterEqual(device_play.count("ansible.builtin.raw:"), 8)
+        self.assertIn("ANSIBLE_RAW_CONNECTION_OK", device_play)
+        self.assertIn("sshpass", device_play)
+        self.assertIn("- scp", device_play)
+        self.assertIn("SSHPASS:", device_play)
+        self.assertIn("no_log: true", device_play)
+        self.assertIn("without remote Python", device_play)
+
     def test_actual_upgrade_requires_preparation_gate(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
         node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
@@ -71,6 +90,8 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("without remote Python", node_tasks)
         self.assertIn("Wait for management IP to answer ping", node_tasks)
         self.assertIn("nohup /bin/sh", node_tasks)
+        self.assertNotIn("ansible.builtin.shell:", node_tasks)
+        self.assertIn("Start installns without remote Python", node_tasks)
         self.assertIn("/var/nsinstall/installns_state", node_tasks)
         self.assertEqual(node_tasks.count("regex_findall"), 2)
         self.assertEqual(node_tasks.count("show ns version"), 2)
