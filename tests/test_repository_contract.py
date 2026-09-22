@@ -33,6 +33,9 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("ansible.builtin.copy:", device_play)
         self.assertNotIn("ansible.builtin.stat:", device_play)
         self.assertGreaterEqual(device_play.count("ansible.builtin.raw:"), 8)
+        self.assertGreaterEqual(device_play.count("ssh_netscaler_adc "), 7)
+        self.assertIn("prep_space_checked: false", device_play)
+        self.assertIn("if (prep_space_checked | bool)", device_play)
         self.assertIn("ANSIBLE_RAW_CONNECTION_OK", device_play)
         self.assertIn("sshpass", device_play)
         self.assertIn("- scp", device_play)
@@ -87,6 +90,10 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("INSTALLNS_RUNNING", node_tasks)
         self.assertIn("node_install_status.rc | default(1)", node_tasks)
         self.assertGreaterEqual(node_tasks.count("ansible.builtin.raw:"), 10)
+        self.assertEqual(
+            node_tasks.count("ansible.builtin.raw:"),
+            node_tasks.count("ssh_netscaler_adc "),
+        )
         self.assertIn("without remote Python", node_tasks)
         self.assertIn("Wait for management IP to answer ping", node_tasks)
         self.assertIn("nohup /bin/sh", node_tasks)
