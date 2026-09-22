@@ -238,8 +238,8 @@
             fail_msg: "SSH port 22 is not reachable on {{ netscaler_hostname }} ({{ nsip }})."
           delegate_to: localhost
 
-        - name: "PREP 2/8 | {{ netscaler_hostname }} | Verify authenticated Ansible connection"
-          ansible.builtin.ping:
+        - name: "PREP 2/8 | {{ netscaler_hostname }} | Verify authenticated raw SSH connection"
+          ansible.builtin.raw: echo ANSIBLE_RAW_CONNECTION_OK
           register: prep_auth_check
           ignore_unreachable: true
           ignore_errors: true
@@ -249,25 +249,45 @@
           ansible.builtin.set_fact:
             prep_authenticated: >-
               {{ not (prep_auth_check.unreachable | default(false))
-                 and not (prep_auth_check.failed | default(false)) }}
+                 and not (prep_auth_check.failed | default(false))
+                 and prep_auth_check.rc | default(1) == 0
+                 and 'ANSIBLE_RAW_CONNECTION_OK' in (prep_auth_check.stdout | default('')) }}
           delegate_to: localhost
 
-        - name: Stop this device when authentication fails
+        - name: Stop this device when raw SSH authentication fails
           ansible.builtin.assert:
             that:
               - prep_authenticated | bool
-            fail_msg: "Ansible could not authenticate to {{ netscaler_hostname }} ({{ nsip }})."
+            fail_msg: >-
+              Ansible could not authenticate or execute a raw command on
+              {{ netscaler_hostname }} ({{ nsip }}).
           delegate_to: localhost
 
-        - name: "PREP 3/8 | {{ netscaler_hostname }} | Check free space in /var"
-          ansible.builtin.shell: >-
-            df -Pk /var | tail -1 | awk '{print $4}'
+        - name: "PREP 3/8 | {{ netscaler_hostname }} | Check free space in /var without remote Python"
+          ansible.builtin.raw: >-
+            df -Pk /var | tail -1 | awk '{print "PREP_FREE_KB=" $4}'
           register: prep_var_df
           changed_when: false
 
+        - name: Parse /var free space
+          ansible.builtin.set_fact:
+            prep_free_matches: >-
+              {{ prep_var_df.stdout | default('')
+                 | regex_findall('(?m)^PREP_FREE_KB=([0-9]+)\\r?$') }}
+          delegate_to: localhost
+
+        - name: Validate /var free-space output
+          ansible.builtin.assert:
+            that:
+              - prep_free_matches | length == 1
+            fail_msg: >-
+              Could not parse free space returned by {{ netscaler_hostname }}
+              ({{ nsip }}); preparation is stopped for this device.
+          delegate_to: localhost
+
         - name: Record /var free space
           ansible.builtin.set_fact:
-            prep_free_kb: "{{ prep_var_df.stdout | trim | int }}"
+            prep_free_kb: "{{ prep_free_matches[0] | int }}"
           delegate_to: localhost
 
         - name: Require at least the configured /var free space
@@ -280,63 +300,127 @@
               at least {{ minimum_var_free_gb }} GB is required.
           delegate_to: localhost
 
-        - name: "PREP 4/8 | {{ netscaler_hostname }} | Ensure {{ firmware_remote_directory }} exists"
-          ansible.builtin.file:
-            path: "{{ firmware_remote_directory }}"
-            state: directory
-            mode: "0755"
+        - name: "PREP 4/8 | {{ netscaler_hostname }} | Ensure {{ firmware_remote_directory }} exists without remote Python"
+          ansible.builtin.raw: >-
+            mkdir -p {{ firmware_remote_directory | quote }}
+            && chmod 0755 {{ firmware_remote_directory | quote }}
+          changed_when: true
 
-        - name: "PREP 5/8 | {{ netscaler_hostname }} | Upload firmware archive"
-          ansible.builtin.copy:
-            src: "{{ hostvars['localhost'].prep_firmware_path }}"
-            dest: "{{ hostvars['localhost'].prep_remote_archive }}"
-            mode: "0644"
+        - name: Check for an already uploaded matching archive
+          ansible.builtin.raw: >-
+            if test -f {{ hostvars['localhost'].prep_remote_archive | quote }};
+            then sha256 -q {{ hostvars['localhost'].prep_remote_archive | quote }};
+            fi
+          register: prep_existing_archive
+          changed_when: false
+          failed_when: false
+
+        - name: Parse existing remote SHA-256
+          ansible.builtin.set_fact:
+            prep_existing_sha_matches: >-
+              {{ prep_existing_archive.stdout | default('')
+                 | regex_findall('(?im)^([0-9a-f]{64})\\r?$') }}
+            prep_upload_required: >-
+              {{ (prep_existing_archive.stdout | default('')
+                  | regex_findall('(?im)^([0-9a-f]{64})\\r?$')
+                  | first | default(''))
+                 != hostvars['localhost'].prep_local_firmware.stat.checksum }}
+          delegate_to: localhost
+
+        - name: "PREP 5/8 | {{ netscaler_hostname }} | Upload firmware archive without remote Python"
+          ansible.builtin.command:
+            argv:
+              - sshpass
+              - -e
+              - scp
+              - -O
+              - -q
+              - -P
+              - "{{ netscaler_ssh_port | string }}"
+              - -o
+              - StrictHostKeyChecking=no
+              - -o
+              - UserKnownHostsFile=/dev/null
+              - "{{ hostvars['localhost'].prep_firmware_path }}"
+              - "{{ nitro_user }}@{{ nsip }}:{{ hostvars['localhost'].prep_remote_archive }}"
+          environment:
+            SSHPASS: "{{ nitro_pass }}"
+          delegate_to: localhost
           register: prep_upload
+          changed_when: prep_upload.rc | default(1) == 0
+          failed_when: false
+          when: prep_upload_required | bool
+          no_log: true
 
-        - name: "PREP 6/8 | {{ netscaler_hostname }} | Calculate remote SHA-256"
-          ansible.builtin.stat:
-            path: "{{ hostvars['localhost'].prep_remote_archive }}"
-            checksum_algorithm: sha256
+        - name: Confirm controller-side SCP upload
+          ansible.builtin.assert:
+            that:
+              - not (prep_upload_required | bool) or prep_upload.rc | default(1) == 0
+            fail_msg: >-
+              SCP upload failed for {{ netscaler_hostname }} ({{ nsip }}).
+              Verify sshpass, SSH credentials, and available /var space.
+            success_msg: >-
+              {{ 'Firmware uploaded through SCP.'
+                 if prep_upload_required | bool
+                 else 'Matching firmware archive already present; upload skipped.' }}
+          delegate_to: localhost
+
+        - name: "PREP 6/8 | {{ netscaler_hostname }} | Calculate remote SHA-256 without remote Python"
+          ansible.builtin.raw: >-
+            sha256 -q {{ hostvars['localhost'].prep_remote_archive | quote }}
           register: prep_remote_firmware
+          changed_when: false
+
+        - name: Parse uploaded firmware SHA-256
+          ansible.builtin.set_fact:
+            prep_remote_sha_matches: >-
+              {{ prep_remote_firmware.stdout | default('')
+                 | regex_findall('(?im)^([0-9a-f]{64})\\r?$') }}
+          delegate_to: localhost
 
         - name: Confirm uploaded firmware integrity
           ansible.builtin.assert:
             that:
-              - prep_remote_firmware.stat.exists | bool
-              - prep_remote_firmware.stat.checksum == hostvars['localhost'].prep_local_firmware.stat.checksum
-            fail_msg: "Uploaded firmware SHA-256 does not match the controller copy."
+              - prep_remote_sha_matches | length == 1
+              - prep_remote_sha_matches[0] == hostvars['localhost'].prep_local_firmware.stat.checksum
+            fail_msg: >-
+              Uploaded firmware SHA-256 is missing or does not match the
+              controller copy on {{ netscaler_hostname }} ({{ nsip }}).
           delegate_to: localhost
 
-        - name: "PREP 7/8 | {{ netscaler_hostname }} | Extract firmware in {{ firmware_remote_directory }}"
-          ansible.builtin.shell: >-
+        - name: "PREP 7/8 | {{ netscaler_hostname }} | Extract firmware without remote Python"
+          ansible.builtin.raw: >-
             tar -xzf {{ hostvars['localhost'].prep_remote_archive | quote }}
             -C {{ firmware_remote_directory | quote }}
           register: prep_extract
+          changed_when: true
 
-        - name: "PREP 8/8 | {{ netscaler_hostname }} | Verify extracted installns"
-          ansible.builtin.stat:
-            path: "{{ hostvars['localhost'].prep_remote_installns }}"
+        - name: "PREP 8/8 | {{ netscaler_hostname }} | Verify extracted installns without remote Python"
+          ansible.builtin.raw: >-
+            test -f {{ hostvars['localhost'].prep_remote_installns | quote }}
           register: prep_installns
+          changed_when: false
+          failed_when: false
 
         - name: Confirm extracted installer is usable
           ansible.builtin.assert:
             that:
-              - prep_installns.stat.exists | bool
-              - prep_installns.stat.isreg | bool
+              - prep_installns.rc | default(1) == 0
             fail_msg: >-
               installns was not found at {{ hostvars['localhost'].prep_remote_installns }}
-              after extraction.
+              after extraction on {{ netscaler_hostname }} ({{ nsip }}).
           delegate_to: localhost
 
-        - name: Write verified firmware marker
-          ansible.builtin.copy:
-            dest: "{{ hostvars['localhost'].prep_remote_marker }}"
-            mode: "0600"
-            content: |
-              sha256={{ hostvars['localhost'].prep_local_firmware.stat.checksum }}
-              archive={{ hostvars['localhost'].prep_remote_archive }}
-              installns={{ hostvars['localhost'].prep_remote_installns }}
-              prepared_at={{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}
+        - name: Write verified firmware marker without remote Python
+          ansible.builtin.raw: >-
+            printf '%s\\n'
+            {{ ('sha256=' ~ hostvars['localhost'].prep_local_firmware.stat.checksum) | quote }}
+            {{ ('archive=' ~ hostvars['localhost'].prep_remote_archive) | quote }}
+            {{ ('installns=' ~ hostvars['localhost'].prep_remote_installns) | quote }}
+            {{ ('prepared_at=' ~ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) | quote }}
+            > {{ hostvars['localhost'].prep_remote_marker | quote }}
+            && chmod 0600 {{ hostvars['localhost'].prep_remote_marker | quote }}
+          changed_when: true
 
         - name: Mark device prepared
           ansible.builtin.set_fact:
