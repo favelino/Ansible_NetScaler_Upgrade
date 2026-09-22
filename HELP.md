@@ -614,10 +614,11 @@ when the subsequent state verification passes.
 A Secondary can reset TCP/22 while finishing its controlled reboot. Earlier
 versions of the playbook could reach the `always` recovery block during this
 window and stop with `UNREACHABLE`, even though the reboot itself was normal.
-The current playbook waits up to `reboot_up_timeout` for both SSH ports before
-re-enabling, saving, and verifying `haSync` and `haProp`. An unreachable
-recovery attempt is recorded as a pair failure but no longer prevents the final
-report from being written.
+The current playbook waits up to `reboot_up_timeout` for both SSH ports and
+then retries authenticated CLI operations before re-enabling, saving, and
+verifying `haSync` and `haProp`. Post-reboot version validation also retries
+until the CLI is stable. An unreachable recovery attempt is recorded as a pair
+failure but no longer prevents the final report from being written.
 
 If this occurs on an older checkout, stop that controller run before it starts
 another pair, wait for both nodes, and restore the controls explicitly:
