@@ -174,14 +174,14 @@ ansible-galaxy collection list netscaler.adc
 Required baseline:
 
 - Ansible Core 2.16 or newer.
-- netscaler.adc collection 2.19.0 or newer.
+- netscaler.adc collection 2.17.0 or newer.
 - sshpass installed when SCP uses password authentication.
 - No unexplained local Git changes.
 
 Install or update the collection with the same Linux user that runs Ansible:
 
 ~~~bash
-ansible-galaxy collection install 'netscaler.adc:>=2.19.0' --force
+ansible-galaxy collection install 'netscaler.adc:>=2.17.0' --force
 ansible-galaxy collection list netscaler.adc
 ~~~
 
