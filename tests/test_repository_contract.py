@@ -98,6 +98,7 @@ class RepositoryContractTests(unittest.TestCase):
             playbook,
         )
         self.assertEqual(playbook.count("ssh_netscaler_adc save ns config"), 2)
+        self.assertIn("running configuration has not changed", playbook)
         self.assertIn("Sync State", playbook)
         self.assertIn("Propagation", playbook)
         self.assertIn("Verify restored HA controls", playbook)
@@ -131,7 +132,16 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("ssh_netscaler_adc nscli", node_tasks)
         self.assertNotIn("ssh_netscaler_adc test", node_tasks)
         self.assertNotIn("ssh_netscaler_adc sha256", node_tasks)
-        self.assertGreaterEqual(node_tasks.count("| quote }}"), 10)
+        self.assertIn(
+            "test -f {{ prepared_firmware_remote_marker | quote }}", node_tasks
+        )
+        self.assertIn(
+            "cd {{ (prepared_firmware_remote_installns | dirname) | quote }}",
+            node_tasks,
+        )
+        self.assertIn("cat {{ node_install_rc | quote }}", node_tasks)
+        self.assertNotIn("{{ ('cat ' ~ node_install_rc) | quote }}", node_tasks)
+        self.assertNotIn("{{ ('rm -f ' ~ node_install_log", node_tasks)
         self.assertIn("without remote Python", node_tasks)
         self.assertIn("Wait for management IP to answer ping", node_tasks)
         self.assertIn("nohup /bin/sh", node_tasks)
