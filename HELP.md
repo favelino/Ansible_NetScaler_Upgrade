@@ -121,10 +121,15 @@ validate roles
 -> force final synchronization from the restored original Primary
 ```
 
-The HA settings are changed through the `netscaler.adc.hanode` collection
-module, not through ad-hoc shell commands. The restoration is in an Ansible
-`always` section, so it is attempted even when a pair fails. If either node
-cannot be restored, that pair is marked `FAILED` and the report explicitly
+The HA settings are changed with the documented NetScaler CLI commands sent
+through the collection's `netscaler.adc.ssh_netscaler_adc` connection plugin.
+They are not BSD shell commands. This avoids a `netscaler.adc.hanode` 2.17.0
+read defect where the NITRO endpoint can return both HA nodes for `id=0` and
+the module stops with a duplicate-primary-key error before changing anything.
+The playbook reads and validates local node 0, changes both controls, saves the
+configuration, and reads them again. The restoration is in an Ansible `always`
+section, so it is attempted even when a pair fails. If either node cannot be
+restored and verified, that pair is marked `FAILED` and the report explicitly
 requires manual recovery. A forced synchronization is performed only after both
 nodes reach the target version and the original HA roles are restored.
 
@@ -546,6 +551,30 @@ ansible -i inventory.ini ns_10_100_48_1 \
 The output must contain Master State : Primary for the recorded Primary.
 Failure at this check occurs before HA controls, installns, or reboot are
 changed, so it is safe to correct the command routing and retry.
+
+### hanode reports a duplicate primary key
+
+Collection 2.17.0 can authenticate to NITRO successfully but fail while reading
+`hanode id=0` because the endpoint returns both HA nodes. The diagnostic ends
+with text similar to `Found more than one resource with the same primary key`.
+This is a collection read-path problem, not a bad password and not evidence that
+the appliance was modified.
+
+Update the repository. The maintained playbook avoids this module path and uses
+the collection's SSH connection plugin with the documented local-node commands:
+
+~~~bash
+git pull --ff-only
+git log -1 --oneline
+
+ansible -i inventory.ini netscaler_nodes \
+  -m ansible.builtin.raw \
+  -a 'ssh_netscaler_adc show ha node 0' \
+  --ask-vault-pass
+~~~
+
+Before Stage 2, each local node must show `Propagation: ENABLED`; `Sync State`
+must be `ENABLED` on the Primary and normally `SUCCESS` on the Secondary.
 
 ## 16. Audit evidence
 
