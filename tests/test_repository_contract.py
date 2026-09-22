@@ -56,6 +56,14 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn(pattern.replace("\\", "\\\\"), prep)
         self.assertEqual(re.findall(pattern, sample), ["9760438"])
 
+    def test_prep_sha_parser_accepts_attached_login_banner(self):
+        prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
+        pattern = r"(?im)^([0-9a-f]{64})(?![0-9a-f])"
+        digest = "60d7c52fa7edf91e12a202ce6afe3e23ae87ed40801403f427dbceca810c7936"
+        sample = digest + "########################################\n"
+        self.assertEqual(prep.count(pattern), 3)
+        self.assertEqual(re.findall(pattern, sample), [digest])
+
     def test_actual_upgrade_requires_preparation_gate(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
         node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
