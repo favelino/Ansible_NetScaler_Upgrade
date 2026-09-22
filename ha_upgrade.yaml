@@ -179,52 +179,88 @@
               Live HA roles no longer match inventory.ini. Run upgrade_prep.yaml again
               before attempting this pair.
 
-        - name: "STEP 02/12 | {{ pair_name }} | Validate hanode module and NITRO access"
-          netscaler.adc.hanode:
-            nsip: "{{ hostvars[item].nsip }}"
-            nitro_user: "{{ nitro_user }}"
-            nitro_pass: "{{ nitro_pass }}"
-            nitro_protocol: "{{ netscaler_management_protocol }}"
-            validate_certs: "{{ netscaler_validate_certs }}"
-            state: present
-            id: 0
-          delegate_to: localhost
+        - name: "STEP 02/12 | {{ pair_name }} | Read local HA controls before isolation"
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ item }}"
           loop:
             - "{{ primary_host }}"
             - "{{ secondary_host }}"
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
-          check_mode: true
+          register: initial_local_ha_controls
           changed_when: false
+
+        - name: "STEP 02/12 | {{ pair_name }} | Require healthy HA controls before isolation"
+          ansible.builtin.assert:
+            that:
+              - (item.stdout | default('')) is search('(?im)^\\s*Sync State\\s*:\\s*(ENABLED|SUCCESS)\\s*$')
+              - (item.stdout | default('')) is search('(?im)^\\s*Propagation\\s*:\\s*ENABLED\\s*$')
+            fail_msg: >-
+              Local haSync or haProp is not healthy on
+              {{ hostvars[item.item].netscaler_hostname | default(item.item) }}
+              ({{ hostvars[item.item].nsip }}). No disruptive action was taken.
+          loop: "{{ initial_local_ha_controls.results }}"
+          loop_control:
+            label: "{{ hostvars[item.item].netscaler_hostname | default(item.item) }} ({{ hostvars[item.item].nsip }})"
 
         - name: "STEP 02/12 | {{ pair_name }} | Mark HA isolation as started"
           ansible.builtin.set_fact:
             ha_controls_change_started: true
 
         - name: "STEP 02/12 | {{ pair_name }} | Disable HA sync and propagation"
-          netscaler.adc.hanode:
-            nsip: "{{ hostvars[item].nsip }}"
-            nitro_user: "{{ nitro_user }}"
-            nitro_pass: "{{ nitro_pass }}"
-            nitro_protocol: "{{ netscaler_management_protocol }}"
-            validate_certs: "{{ netscaler_validate_certs }}"
-            save_config: true
-            state: present
-            id: 0
-            hasync: DISABLED
-            haprop: DISABLED
-          delegate_to: localhost
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc set ha node -hasync DISABLED -haprop DISABLED
+          delegate_to: "{{ item }}"
           loop:
             - "{{ primary_host }}"
             - "{{ secondary_host }}"
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: ha_disable_commands
+          changed_when: true
+
+        - name: "STEP 02/12 | {{ pair_name }} | Save disabled HA controls"
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc save ns config
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          changed_when: true
+
+        - name: "STEP 02/12 | {{ pair_name }} | Read isolated local HA controls"
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: isolated_local_ha_controls
+          changed_when: false
 
         - name: "STEP 02/12 | {{ pair_name }} | Confirm HA isolation"
+          ansible.builtin.assert:
+            that:
+              - (item.stdout | default('')) is search('(?im)^\\s*Sync State\\s*:\\s*DISABLED\\s*$')
+              - (item.stdout | default('')) is search('(?im)^\\s*Propagation\\s*:\\s*DISABLED\\s*$')
+            fail_msg: >-
+              haSync or haProp was not confirmed DISABLED on
+              {{ hostvars[item.item].netscaler_hostname | default(item.item) }}
+              ({{ hostvars[item.item].nsip }}). The always section will attempt restoration.
+          loop: "{{ isolated_local_ha_controls.results }}"
+          loop_control:
+            label: "{{ hostvars[item.item].netscaler_hostname | default(item.item) }} ({{ hostvars[item.item].nsip }})"
+
+        - name: "STEP 02/12 | {{ pair_name }} | Announce confirmed HA isolation"
           ansible.builtin.debug:
             msg: >-
-              HA synchronization and command propagation are disabled and saved
-              on both nodes for the duration of this pair upgrade.
+              HA synchronization and command propagation are disabled, saved, and
+              verified on both nodes for the duration of this pair upgrade.
 
         - name: "STEP 03-05/12 | {{ pair_name }} | Upgrade original Secondary"
           ansible.builtin.include_tasks: tasks/upgrade_node.yml
@@ -340,31 +376,73 @@
 
       always:
         - name: Restore HA synchronization and command propagation
-          netscaler.adc.hanode:
-            nsip: "{{ hostvars[item].nsip }}"
-            nitro_user: "{{ nitro_user }}"
-            nitro_pass: "{{ nitro_pass }}"
-            nitro_protocol: "{{ netscaler_management_protocol }}"
-            validate_certs: "{{ netscaler_validate_certs }}"
-            save_config: true
-            state: present
-            id: 0
-            hasync: ENABLED
-            haprop: ENABLED
-          delegate_to: localhost
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc set ha node -hasync ENABLED -haprop ENABLED
+          delegate_to: "{{ item }}"
           loop:
             - "{{ primary_host }}"
             - "{{ secondary_host }}"
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
-          register: ha_restore_results
+          register: ha_restore_commands
+          when: ha_controls_change_started | default(false) | bool
+          changed_when: true
+          ignore_errors: true
+
+        - name: Save restored HA controls
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc save ns config
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: ha_restore_save_commands
+          when: ha_controls_change_started | default(false) | bool
+          changed_when: true
+          ignore_errors: true
+
+        - name: Read restored local HA controls
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: ha_restored_local_controls
+          when: ha_controls_change_started | default(false) | bool
+          changed_when: false
+          ignore_errors: true
+
+        - name: Verify restored HA controls
+          ansible.builtin.assert:
+            that:
+              - (item.stdout | default('')) is search('(?im)^\\s*Sync State\\s*:\\s*(ENABLED|SUCCESS)\\s*$')
+              - (item.stdout | default('')) is search('(?im)^\\s*Propagation\\s*:\\s*ENABLED\\s*$')
+            fail_msg: >-
+              haSync or haProp was not confirmed ENABLED on
+              {{ hostvars[item.item].netscaler_hostname | default(item.item) }}
+              ({{ hostvars[item.item].nsip }}).
+          loop: "{{ ha_restored_local_controls.results | default([]) }}"
+          loop_control:
+            label: "{{ hostvars[item.item].netscaler_hostname | default(item.item) }} ({{ hostvars[item.item].nsip }})"
+          register: ha_restore_verification
           when: ha_controls_change_started | default(false) | bool
           ignore_errors: true
 
         - name: Record HA controls restoration state
           ansible.builtin.set_fact:
             ha_controls_restored: >-
-              {{ not (ha_restore_results.failed | default(false)) }}
+              {{
+                not (ha_restore_commands.failed | default(false))
+                and not (ha_restore_save_commands.failed | default(false))
+                and not (ha_restored_local_controls.failed | default(false))
+                and not (ha_restore_verification.failed | default(false))
+                and (ha_restored_local_controls.results | default([]) | length == 2)
+              }}
           when: ha_controls_change_started | default(false) | bool
 
         - name: Mark pair failed when HA controls could not be restored
@@ -378,21 +456,15 @@
             - not (ha_controls_restored | default(false) | bool)
 
         - name: Force final HA synchronization from restored original Primary
-          netscaler.adc.hasync:
-            nsip: "{{ hostvars[primary_host].nsip }}"
-            nitro_user: "{{ nitro_user }}"
-            nitro_pass: "{{ nitro_pass }}"
-            nitro_protocol: "{{ netscaler_management_protocol }}"
-            validate_certs: "{{ netscaler_validate_certs }}"
-            force: true
-            save: "YES"
-          delegate_to: localhost
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc force ha sync
+          delegate_to: "{{ primary_host }}"
           register: final_ha_sync
           when:
             - pair_status == 'SUCCESS'
             - ha_controls_restored | default(false) | bool
+          changed_when: true
           ignore_errors: true
-          no_log: true
 
         - name: Mark pair failed when final HA synchronization failed
           ansible.builtin.set_fact:
