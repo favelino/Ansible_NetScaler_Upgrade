@@ -56,6 +56,13 @@ ansible-playbook upgrade_prep.yaml \
 
 Preparation performs the following operations:
 
+Preparation does not depend on the appliance's bundled Python runtime. Remote
+authentication, disk checks, checksum, extraction, and validation use raw SSH
+commands. The controller uploads firmware with `sshpass` and legacy-protocol
+`scp -O`, with the Vault password supplied only through the protected
+`SSHPASS` environment and the task output hidden by `no_log`. This supports
+older source releases such as NetScaler 13.1.
+
 - Queries every Console API page and creates `inventory.ini` with all reciprocal
   HA pairs, including currently unhealthy pairs so they can be reported.
 - Processes up to `prep_devices_parallel` appliances simultaneously (default 20).
@@ -104,10 +111,12 @@ is recorded in the final report; it must be corrected manually before another
 upgrade attempt. The final forced synchronization runs only after the complete
 pair upgrade and original-role validation succeed.
 
-Live task names show `STEP 01/12` through `STEP 12/12`. Because NetScaler
-appliances do not provide Ansible's normal async-job directory reliably,
-`installns` is launched as a persistent remote process and polled through
-controller-independent PID, log, and return-code files in `/var/tmp`.
+Live task names show `STEP 01/12` through `STEP 12/12`. All appliance
+commands, including the `installns` launch, use raw SSH and do not require the
+NetScaler's bundled Python runtime. Because NetScaler appliances do not provide
+Ansible's normal async-job directory reliably, `installns` is launched as a
+persistent remote process and polled through controller-independent PID, log,
+and return-code files in `/var/tmp`.
 
 Before launching `installns`, Stage 2 inspects
 `/var/nsinstall/installns_state`. If the target image has an `END_TIME`, a
