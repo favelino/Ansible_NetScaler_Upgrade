@@ -506,6 +506,26 @@ The maintained workflow does not use the unreliable NetScaler Ansible async
 directory. installns uses persistent PID, log, and return-code files under
 /var/tmp.
 
+### SHA-256 appears missing or mismatched
+
+Current preparation accepts a NetScaler login banner appended directly to a
+valid 64-character digest. Update before retrying:
+
+~~~bash
+git pull --ff-only
+git log -1 --oneline
+
+ansible -i inventory.ini ns_10_100_48_1 \
+  -m ansible.builtin.raw \
+  -a "'sha256 -q /var/nsinstall/build-14.1-73.33_nc_64.tgz'" \
+  --ask-vault-pass
+
+sha256sum new_firmware/build-14.1-73.33_nc_64.tgz
+~~~
+
+If the digests match, rerunning Stage 1 reuses the already uploaded archive.
+A true mismatch causes a fresh upload and validation.
+
 ## 16. Audit evidence
 
 Retain:
