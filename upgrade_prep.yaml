@@ -266,7 +266,7 @@
 
         - name: "PREP 3/8 | {{ netscaler_hostname }} | Check free space in /var without remote Python"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc df -Pk /var
+            {{ 'df -Pk /var' | quote }}
           register: prep_var_df
           changed_when: false
 
@@ -304,15 +304,15 @@
 
         - name: "PREP 4/8 | {{ netscaler_hostname }} | Ensure {{ firmware_remote_directory }} exists without remote Python"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc mkdir -p {{ firmware_remote_directory | quote }}
-            && chmod 0755 {{ firmware_remote_directory | quote }}
+            {{ ('mkdir -p ' ~ firmware_remote_directory ~
+                ' && chmod 0755 ' ~ firmware_remote_directory) | quote }}
           changed_when: true
 
         - name: Check for an already uploaded matching archive
           ansible.builtin.raw: >-
-            ssh_netscaler_adc if test -f {{ hostvars['localhost'].prep_remote_archive | quote }};
-            then sha256 -q {{ hostvars['localhost'].prep_remote_archive | quote }};
-            fi
+            {{ ('if test -f ' ~ hostvars['localhost'].prep_remote_archive ~
+                '; then sha256 -q ' ~ hostvars['localhost'].prep_remote_archive ~
+                '; fi') | quote }}
           register: prep_existing_archive
           changed_when: false
           failed_when: false
@@ -369,7 +369,7 @@
 
         - name: "PREP 6/8 | {{ netscaler_hostname }} | Calculate remote SHA-256 without remote Python"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc sha256 -q {{ hostvars['localhost'].prep_remote_archive | quote }}
+            {{ ('sha256 -q ' ~ hostvars['localhost'].prep_remote_archive) | quote }}
           register: prep_remote_firmware
           changed_when: false
 
@@ -392,14 +392,14 @@
 
         - name: "PREP 7/8 | {{ netscaler_hostname }} | Extract firmware without remote Python"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc tar -xzf {{ hostvars['localhost'].prep_remote_archive | quote }}
-            -C {{ firmware_remote_directory | quote }}
+            {{ ('tar -xzf ' ~ hostvars['localhost'].prep_remote_archive ~
+                ' -C ' ~ firmware_remote_directory) | quote }}
           register: prep_extract
           changed_when: true
 
         - name: "PREP 8/8 | {{ netscaler_hostname }} | Verify extracted installns without remote Python"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc test -f {{ hostvars['localhost'].prep_remote_installns | quote }}
+            {{ ('test -f ' ~ hostvars['localhost'].prep_remote_installns) | quote }}
           register: prep_installns
           changed_when: false
           failed_when: false
@@ -415,13 +415,13 @@
 
         - name: Write verified firmware marker without remote Python
           ansible.builtin.raw: >-
-            ssh_netscaler_adc printf '%s\\n'
-            {{ ('sha256=' ~ hostvars['localhost'].prep_local_firmware.stat.checksum) | quote }}
-            {{ ('archive=' ~ hostvars['localhost'].prep_remote_archive) | quote }}
-            {{ ('installns=' ~ hostvars['localhost'].prep_remote_installns) | quote }}
-            {{ ('prepared_at=' ~ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ')) | quote }}
-            > {{ hostvars['localhost'].prep_remote_marker | quote }}
-            && chmod 0600 {{ hostvars['localhost'].prep_remote_marker | quote }}
+            {{ ('echo sha256=' ~ hostvars['localhost'].prep_local_firmware.stat.checksum ~
+                ' > ' ~ hostvars['localhost'].prep_remote_marker ~
+                ' && echo archive=' ~ hostvars['localhost'].prep_remote_archive ~
+                ' >> ' ~ hostvars['localhost'].prep_remote_marker ~
+                ' && echo installns=' ~ hostvars['localhost'].prep_remote_installns ~
+                ' >> ' ~ hostvars['localhost'].prep_remote_marker ~
+                ' && chmod 0600 ' ~ hostvars['localhost'].prep_remote_marker) | quote }}
           changed_when: true
 
         - name: Mark device prepared
