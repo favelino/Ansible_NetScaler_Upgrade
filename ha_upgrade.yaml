@@ -229,7 +229,14 @@
             - "{{ secondary_host }}"
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
-          changed_when: true
+          register: ha_disable_save_commands
+          changed_when: >-
+            ha_disable_save_commands.rc == 0
+            and 'running configuration has not changed' not in
+                (ha_disable_save_commands.stdout | default('') | lower)
+          failed_when:
+            - ha_disable_save_commands.rc != 0
+            - "'running configuration has not changed' not in (ha_disable_save_commands.stdout | default('') | lower)"
 
         - name: "STEP 02/12 | {{ pair_name }} | Read isolated local HA controls"
           ansible.builtin.raw: >-
@@ -400,7 +407,13 @@
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
           register: ha_restore_save_commands
           when: ha_controls_change_started | default(false) | bool
-          changed_when: true
+          changed_when: >-
+            ha_restore_save_commands.rc == 0
+            and 'running configuration has not changed' not in
+                (ha_restore_save_commands.stdout | default('') | lower)
+          failed_when:
+            - ha_restore_save_commands.rc != 0
+            - "'running configuration has not changed' not in (ha_restore_save_commands.stdout | default('') | lower)"
           ignore_errors: true
 
         - name: Read restored local HA controls
