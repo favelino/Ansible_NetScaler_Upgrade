@@ -45,11 +45,11 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("no_log: true", device_play)
         self.assertIn("without remote Python", device_play)
 
-    def test_prep_free_space_parser_accepts_attached_login_banner(self):
+    def test_prep_free_space_parser_accepts_13_1_and_attached_banner(self):
         prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
         pattern = (
-            r"(?m)^\S+\s+[0-9]+\s+[0-9]+\s+([0-9]+)"
-            r"\s+[0-9]+%\s+/var(?=\r?$|#)"
+            r"(?m)^/dev/\S+\s+[0-9]+\s+[0-9]+\s+([0-9]+)"
+            r"\s+[0-9]+%"
         )
         sample = (
             "Filesystem  1024-blocks Used Avail Capacity Mounted on\n"
