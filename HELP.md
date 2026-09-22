@@ -526,6 +526,27 @@ sha256sum new_firmware/build-14.1-73.33_nc_64.tgz
 If the digests match, rerunning Stage 1 reuses the already uploaded archive.
 A true mismatch causes a fresh upload and validation.
 
+### HA role check fails immediately
+
+If all pairs fail at Confirm original Primary role is still current with a
+non-zero return code, update the repository. NetScaler CLI commands must be sent
+directly through the connection-plugin bypass marker; BSD commands must use the
+plugin's shell path.
+
+~~~bash
+git pull --ff-only
+git log -1 --oneline
+
+ansible -i inventory.ini ns_10_100_48_1 \
+  -m ansible.builtin.raw \
+  -a 'ssh_netscaler_adc show ha node' \
+  --ask-vault-pass
+~~~
+
+The output must contain Master State : Primary for the recorded Primary.
+Failure at this check occurs before HA controls, installns, or reboot are
+changed, so it is safe to correct the command routing and retry.
+
 ## 16. Audit evidence
 
 Retain:
