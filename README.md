@@ -231,6 +231,12 @@ For each pair, Stage 2:
 9. Re-enables and saves `haSync` and `haProp` on both nodes.
 10. Forces a final synchronization from the restored original Primary.
 
+HA controls are changed with documented NetScaler CLI commands through the
+collection's `netscaler.adc.ssh_netscaler_adc` connection plugin. Local node
+state is verified before isolation, after isolation, and after restoration. This
+avoids a `netscaler.adc.hanode` 2.17.0 duplicate-primary-key read failure on
+two-node HA responses.
+
 HA control restoration is in an Ansible `always` section. A restoration
 failure marks the pair `FAILED` and is included in the report.
 
