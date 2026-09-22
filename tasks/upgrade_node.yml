@@ -273,13 +273,21 @@
     ssh_netscaler_adc show ns version
   delegate_to: "{{ upgrade_target }}"
   register: node_version_after_raw
+  until:
+    - not (node_version_after_raw.unreachable | default(false))
+    - node_version_after_raw.rc | default(1) == 0
+    - (node_version_after_raw.stdout | default('')) is search('(?im)NS[0-9]+(?:[.][0-9]+)*: Build [0-9]+(?:[.][0-9]+)*')
+  retries: >-
+    {{ ((reboot_up_timeout | int) / 10) | round(0, 'ceil') | int }}
+  delay: 10
   changed_when: false
+  ignore_unreachable: true
   no_log: true
 
 - name: Find final version in complete command output
   ansible.builtin.set_fact:
     node_version_after_matches: >-
-      {{ node_version_after_raw.stdout
+      {{ (node_version_after_raw.stdout | default(''))
          | regex_findall('(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)') }}
 
 - name: Validate final version output
