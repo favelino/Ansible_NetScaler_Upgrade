@@ -86,7 +86,9 @@ class RepositoryContractTests(unittest.TestCase):
         report = playbook.index("Build pair report record")
         self.assertLess(disable, upgrade_secondary)
         self.assertLess(restore, report)
-        self.assertEqual(playbook.count("netscaler.adc.hanode:"), 2)
+        self.assertEqual(playbook.count("netscaler.adc.hanode:"), 3)
+        self.assertIn("Validate hanode module and NITRO access", playbook)
+        self.assertIn("check_mode: true", playbook)
         self.assertIn("hasync: DISABLED", playbook)
         self.assertIn("haprop: DISABLED", playbook)
         self.assertIn("hasync: ENABLED", playbook)
@@ -108,6 +110,8 @@ class RepositoryContractTests(unittest.TestCase):
         final_assertion = playbook.index("Return a failing exit code")
         self.assertLess(json_report, final_assertion)
         self.assertLess(markdown_report, final_assertion)
+        self.assertIn("ansible_failed_task.action", playbook)
+        self.assertNotIn("ansible_failed_task.name", playbook)
 
     def test_node_upgrade_uses_persistent_resume_tracking(self):
         node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
