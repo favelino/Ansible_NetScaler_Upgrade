@@ -95,6 +95,11 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("netscaler.adc.hasync:", playbook)
         self.assertIn('save: "YES"', playbook)
         self.assertIn("ignore_errors: true", playbook)
+        self.assertNotIn("ssh_netscaler_adc nscli", playbook)
+        self.assertEqual(playbook.count("ssh_netscaler_adc show ha node"), 6)
+        self.assertEqual(
+            playbook.count("ssh_netscaler_adc force ha failover -force"), 2
+        )
 
     def test_playbook_writes_reports_before_final_assertion(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
@@ -111,10 +116,11 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("INSTALLNS_RUNNING", node_tasks)
         self.assertIn("node_install_status.rc | default(1)", node_tasks)
         self.assertGreaterEqual(node_tasks.count("ansible.builtin.raw:"), 10)
-        self.assertEqual(
-            node_tasks.count("ansible.builtin.raw:"),
-            node_tasks.count("ssh_netscaler_adc "),
-        )
+        self.assertEqual(node_tasks.count("ssh_netscaler_adc show ns version"), 2)
+        self.assertNotIn("ssh_netscaler_adc nscli", node_tasks)
+        self.assertNotIn("ssh_netscaler_adc test", node_tasks)
+        self.assertNotIn("ssh_netscaler_adc sha256", node_tasks)
+        self.assertGreaterEqual(node_tasks.count("| quote }}"), 10)
         self.assertIn("without remote Python", node_tasks)
         self.assertIn("Wait for management IP to answer ping", node_tasks)
         self.assertIn("nohup /bin/sh", node_tasks)
