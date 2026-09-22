@@ -86,22 +86,29 @@ class RepositoryContractTests(unittest.TestCase):
         report = playbook.index("Build pair report record")
         self.assertLess(disable, upgrade_secondary)
         self.assertLess(restore, report)
-        self.assertEqual(playbook.count("netscaler.adc.hanode:"), 3)
-        self.assertIn("Validate hanode module and NITRO access", playbook)
-        self.assertIn("check_mode: true", playbook)
-        self.assertIn("hasync: DISABLED", playbook)
-        self.assertIn("haprop: DISABLED", playbook)
-        self.assertIn("hasync: ENABLED", playbook)
-        self.assertIn("haprop: ENABLED", playbook)
-        self.assertIn("save_config: true", playbook)
-        self.assertIn("netscaler.adc.hasync:", playbook)
-        self.assertIn('save: "YES"', playbook)
+        self.assertNotIn("netscaler.adc.hanode:", playbook)
+        self.assertNotIn("netscaler.adc.hasync:", playbook)
+        self.assertIn("Require healthy HA controls before isolation", playbook)
+        self.assertIn(
+            "ssh_netscaler_adc set ha node -hasync DISABLED -haprop DISABLED",
+            playbook,
+        )
+        self.assertIn(
+            "ssh_netscaler_adc set ha node -hasync ENABLED -haprop ENABLED",
+            playbook,
+        )
+        self.assertEqual(playbook.count("ssh_netscaler_adc save ns config"), 2)
+        self.assertIn("Sync State", playbook)
+        self.assertIn("Propagation", playbook)
+        self.assertIn("Verify restored HA controls", playbook)
         self.assertIn("ignore_errors: true", playbook)
         self.assertNotIn("ssh_netscaler_adc nscli", playbook)
-        self.assertEqual(playbook.count("ssh_netscaler_adc show ha node"), 6)
+        self.assertEqual(playbook.count("ssh_netscaler_adc show ha node"), 9)
+        self.assertEqual(playbook.count("ssh_netscaler_adc show ha node 0"), 3)
         self.assertEqual(
             playbook.count("ssh_netscaler_adc force ha failover -force"), 2
         )
+        self.assertEqual(playbook.count("ssh_netscaler_adc force ha sync"), 1)
 
     def test_playbook_writes_reports_before_final_assertion(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
