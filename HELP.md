@@ -576,6 +576,39 @@ ansible -i inventory.ini netscaler_nodes \
 Before Stage 2, each local node must show `Propagation: ENABLED`; `Sync State`
 must be `ENABLED` on the Primary and normally `SUCCESS` on the Secondary.
 
+### installns launch says the complete command is not found
+
+If every pair fails at `Start installns without remote Python` with output
+similar to the following, no installer was started:
+
+~~~text
+sh: cd /var/nsinstall && (nohup ...): not found
+ERROR: Export failed.
+~~~
+
+The `netscaler.adc.ssh_netscaler_adc` connection plugin automatically prefixes
+BSD commands with the NetScaler `shell` command. Quoting the complete compound
+command adds a second shell-quoting layer and makes the appliance interpret the
+entire line as one executable name. The maintained playbook quotes paths and the
+inner `/bin/sh -c` script only, not the complete outer command.
+
+Update and perform a syntax check before retrying:
+
+~~~bash
+git pull --ff-only
+git log -1 --oneline
+
+ansible-playbook upgrade_perform.yaml \
+  -i inventory.ini \
+  --syntax-check
+~~~
+
+The failed launch does not run `installns` and does not reboot the appliance.
+The playbook's `always` section re-enables and verifies `haSync` and
+`haProp`. A Secondary response of `Warning: The running configuration has not
+changed` during `save ns config` is treated as a successful idempotent save
+when the subsequent state verification passes.
+
 ## 16. Audit evidence
 
 Retain:
