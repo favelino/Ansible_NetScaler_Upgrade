@@ -47,10 +47,7 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_prep_free_space_parser_accepts_13_1_and_attached_banner(self):
         prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
-        pattern = (
-            r"(?m)^/dev/\S+\s+[0-9]+\s+[0-9]+\s+([0-9]+)"
-            r"\s+[0-9]+%"
-        )
+        pattern = r"([0-9]+) +[0-9]+%"
         sample = (
             "Filesystem  1024-blocks Used Avail Capacity Mounted on\n"
             "/dev/da0s1e 14519676 3597664 9760438 27% "
