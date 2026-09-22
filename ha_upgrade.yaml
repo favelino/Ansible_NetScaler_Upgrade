@@ -627,4 +627,4 @@
         that:
           - failed_pairs | length == 0
         success_msg: "SUCCESS: every HA pair passed final version and role validation."
-        fail_msg: "FAILED: one or more HA pairs failed. Review the generated report before retrying."
+
