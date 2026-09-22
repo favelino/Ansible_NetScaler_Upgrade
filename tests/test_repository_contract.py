@@ -48,15 +48,15 @@ class RepositoryContractTests(unittest.TestCase):
     def test_prep_free_space_parser_accepts_attached_login_banner(self):
         prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
         pattern = (
-            r"(?m)^\\S+\\s+[0-9]+\\s+[0-9]+\\s+([0-9]+)"
-            r"\\s+[0-9]+%\\s+/var(?=\\r?$|#)"
+            r"(?m)^\S+\s+[0-9]+\s+[0-9]+\s+([0-9]+)"
+            r"\s+[0-9]+%\s+/var(?=\r?$|#)"
         )
         sample = (
             "Filesystem  1024-blocks Used Avail Capacity Mounted on\n"
             "/dev/da0s1e 14519676 3597664 9760438 27% "
             "/var########################################\n"
         )
-        self.assertIn(pattern.replace("\\\\", "\\\\\\\\"), prep)
+        self.assertIn(pattern.replace("\\", "\\\\"), prep)
         self.assertEqual(re.findall(pattern, sample), ["9760438"])
 
     def test_actual_upgrade_requires_preparation_gate(self):
