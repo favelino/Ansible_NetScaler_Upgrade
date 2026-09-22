@@ -147,17 +147,17 @@
       when: node_install_resume_state == 'INSTALLNS_REQUIRED'
       changed_when: true
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Start installns on {{ upgrade_role_label }}"
-      ansible.builtin.shell:
-        cmd: >-
-          nohup /bin/sh -c
-          {{ ('./installns -Y -n > ' ~ node_install_log ~ ' 2>&1; rc=$?; echo $rc > ' ~ node_install_rc) | quote }}
-          </dev/null >/dev/null 2>&1 &
-          echo $! > {{ node_install_pid | quote }}
-        chdir: "{{ prepared_firmware_remote_installns | dirname }}"
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Start installns without remote Python on {{ upgrade_role_label }}"
+      ansible.builtin.raw: >-
+        cd {{ (prepared_firmware_remote_installns | dirname) | quote }}
+        && (nohup /bin/sh -c
+        {{ ('./installns -Y -n > ' ~ node_install_log ~ ' 2>&1; rc=$?; echo $rc > ' ~ node_install_rc) | quote }}
+        </dev/null >/dev/null 2>&1 &
+        echo $! > {{ node_install_pid | quote }})
       delegate_to: "{{ upgrade_target }}"
       when: node_install_resume_state == 'INSTALLNS_REQUIRED'
       register: node_install_launch
+      changed_when: true
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Poll installns completion"
       ansible.builtin.raw: >-
