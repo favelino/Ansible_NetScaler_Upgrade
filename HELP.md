@@ -35,6 +35,12 @@ entry, uploads it to `/var/nsinstall/`, compares SHA-256 checksums, extracts it
 with `tar -xzf`, and verifies the resulting installer path. This supports archives
 where `installns` is at the root or inside a build subdirectory.
 
+The preparation and upgrade appliance commands are Python-free. NetScaler 13.1
+does not need to execute `ansible.builtin.ping`, `copy`, `stat`, `file`, or
+`shell` modules. The controller uses `sshpass` with `scp -O` for the firmware
+transfer; disk checks, checksums, extraction, markers, and `installns` execution
+use raw SSH. Do not install or modify Python packages on a NetScaler appliance.
+
 ## 4. Run Stage 1 — preparation
 
 ```bash
@@ -98,7 +104,8 @@ During `installns`, the controller polls persistent `.pid`, `.log`, and
 `.rc` files under `/var/tmp`; it does not depend on
 `~/.ansible_async`, which is not reliably available on NetScaler. Repeated
 poll messages mean the installer is still running, not that another installer
-was started.
+was started. The persistent launch and polling use raw SSH and remain usable if
+the appliance's bundled Python runtime is unavailable before or after staging.
 
 The ordered sequence for each pair is:
 
