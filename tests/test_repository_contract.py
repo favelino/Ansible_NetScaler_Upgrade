@@ -102,6 +102,12 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("Sync State", playbook)
         self.assertIn("Propagation", playbook)
         self.assertIn("Verify restored HA controls", playbook)
+        self.assertIn(
+            "Wait for both nodes to accept SSH before HA restoration", playbook
+        )
+        self.assertIn("ha_restore_connectivity.failed", playbook)
+        self.assertIn("ha_restore_commands.unreachable", playbook)
+        self.assertGreaterEqual(playbook.count("ignore_unreachable: true"), 4)
         self.assertIn("ignore_errors: true", playbook)
         self.assertNotIn("ssh_netscaler_adc nscli", playbook)
         self.assertEqual(playbook.count("ssh_netscaler_adc show ha node"), 9)
