@@ -152,6 +152,10 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_node_upgrade_uses_persistent_resume_tracking(self):
         node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
+        self.assertNotIn("{{ upgrade_run_id }}", node_tasks)
+        self.assertEqual(
+            node_tasks.count("hostvars['localhost'].upgrade_run_id"), 4
+        )
         self.assertNotIn("\n      async:", node_tasks)
         self.assertIn("INSTALLNS_STAGED", node_tasks)
         self.assertIn("INSTALLNS_RUNNING", node_tasks)
