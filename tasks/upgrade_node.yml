@@ -80,9 +80,9 @@
         node_install_pid: >-
           /var/tmp/ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.pid
         node_install_evidence: >-
-          {{ report_directory }}/upgrade-{{ upgrade_run_id }}-{{ upgrade_target }}-installns.txt
+          {{ report_directory }}/upgrade-{{ hostvars['localhost'].upgrade_run_id }}-{{ upgrade_target }}-installns.txt
         node_postboot_evidence: >-
-          {{ report_directory }}/upgrade-{{ upgrade_run_id }}-{{ upgrade_target }}-postboot.txt
+          {{ report_directory }}/upgrade-{{ hostvars['localhost'].upgrade_run_id }}-{{ upgrade_target }}-postboot.txt
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Check pre-upgrade backup"
       ansible.builtin.raw: ssh_netscaler_adc show system backup
@@ -304,7 +304,7 @@
         dest: "{{ node_install_evidence }}"
         mode: "0600"
         content: |
-          Run ID: {{ upgrade_run_id }}
+          Run ID: {{ hostvars['localhost'].upgrade_run_id }}
           Pair: {{ pair_name }}
           Role: {{ upgrade_role_label }}
           Host: {{ upgrade_target }} ({{ hostvars[upgrade_target].nsip }})
@@ -474,7 +474,7 @@
     dest: "{{ node_postboot_evidence }}"
     mode: "0600"
     content: |
-      Run ID: {{ upgrade_run_id }}
+      Run ID: {{ hostvars['localhost'].upgrade_run_id }}
       Pair: {{ pair_name }}
       Role: {{ upgrade_role_label }}
       Host: {{ upgrade_target }} ({{ hostvars[upgrade_target].nsip }})
