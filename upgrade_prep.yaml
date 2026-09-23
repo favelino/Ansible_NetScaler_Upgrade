@@ -32,6 +32,7 @@
              prep_console_pass | length > 0)
           - prep_devices_parallel | int > 0
           - minimum_var_free_gb | int >= 5
+          - netscaler_target_version is match('^[0-9]+(?:[.][0-9]+)*-[0-9]+(?:[.][0-9]+)*$')
           - vault_nitro_user | default('') | length > 0
           - vault_nitro_pass | default('') | length > 0
         fail_msg: >-
@@ -89,14 +90,26 @@
           {{ prep_archive_members.stdout_lines
              | select('match', '(^|.*/)installns$')
              | list }}
+        prep_filename_version_matches: >-
+          {{ prep_firmware_name
+             | regex_findall('(?i)^build-([0-9]+(?:[.][0-9]+)*-[0-9]+(?:[.][0-9]+)*)_') }}
+        prep_target_image_matches: >-
+          {{ prep_archive_members.stdout_lines
+             | select('match', '(^|.*/)ns-' ~ (netscaler_target_version | regex_escape) ~ '[.]gz$')
+             | list }}
 
     - name: Require one unambiguous installns entry
       ansible.builtin.assert:
         that:
           - prep_installns_matches | length == 1
+          - prep_filename_version_matches | length == 1
+          - prep_filename_version_matches[0] == netscaler_target_version
+          - prep_target_image_matches | length == 1
         fail_msg: >-
-          The firmware archive must contain exactly one installns file.
-          Found {{ prep_installns_matches | length }}.
+          Firmware, filename, and netscaler_target_version must agree. Expected
+          build-{{ netscaler_target_version }}_*.tgz with one installns and one
+          ns-{{ netscaler_target_version }}.gz image. Found installns={{ prep_installns_matches | length }},
+          filename versions={{ prep_filename_version_matches }}, target images={{ prep_target_image_matches | length }}.
 
     - name: Record the extracted installns location
       ansible.builtin.set_fact:
@@ -155,7 +168,6 @@
         ansible_connection: netscaler.adc.ssh_netscaler_adc
         ansible_user: "{{ nitro_user }}"
         ansible_password: "{{ nitro_pass }}"
-        ansible_python_interpreter: "{{ netscaler_python_path }}"
         validate_certs: false
       loop: "{{ prep_inventory_data.nodes }}"
       loop_control:
@@ -393,13 +405,23 @@
         - name: "PREP 7/8 | {{ netscaler_hostname }} | Extract firmware without remote Python"
           ansible.builtin.raw: >-
             {{ ('tar -xzf ' ~ hostvars['localhost'].prep_remote_archive ~
-                ' -C ' ~ firmware_remote_directory) | quote }}
+                ' -C ' ~ firmware_remote_directory ~ ' && echo FIRMWARE_EXTRACT_OK') | quote }}
           register: prep_extract
           changed_when: true
 
+        - name: Confirm firmware extraction completed
+          ansible.builtin.assert:
+            that:
+              - "'FIRMWARE_EXTRACT_OK' in (prep_extract.stdout | default(''))"
+            fail_msg: >-
+              Firmware extraction did not return its success sentinel on
+              {{ netscaler_hostname }} ({{ nsip }}).
+          delegate_to: localhost
+
         - name: "PREP 8/8 | {{ netscaler_hostname }} | Verify extracted installns without remote Python"
           ansible.builtin.raw: >-
-            {{ ('test -f ' ~ hostvars['localhost'].prep_remote_installns) | quote }}
+            {{ ('if test -f ' ~ hostvars['localhost'].prep_remote_installns ~
+                '; then echo INSTALLNS_FILE_OK; else echo INSTALLNS_FILE_MISSING; fi') | quote }}
           register: prep_installns
           changed_when: false
           failed_when: false
@@ -407,7 +429,7 @@
         - name: Confirm extracted installer is usable
           ansible.builtin.assert:
             that:
-              - prep_installns.rc | default(1) == 0
+              - "'INSTALLNS_FILE_OK' in (prep_installns.stdout | default(''))"
             fail_msg: >-
               installns was not found at {{ hostvars['localhost'].prep_remote_installns }}
               after extraction on {{ netscaler_hostname }} ({{ nsip }}).
@@ -421,8 +443,18 @@
                 ' >> ' ~ hostvars['localhost'].prep_remote_marker ~
                 ' && echo installns=' ~ hostvars['localhost'].prep_remote_installns ~
                 ' >> ' ~ hostvars['localhost'].prep_remote_marker ~
-                ' && chmod 0600 ' ~ hostvars['localhost'].prep_remote_marker) | quote }}
+                ' && chmod 0600 ' ~ hostvars['localhost'].prep_remote_marker ~
+                ' && echo PREP_MARKER_WRITTEN') | quote }}
+          register: prep_marker_write
           changed_when: true
+
+        - name: Confirm verified firmware marker was written
+          ansible.builtin.assert:
+            that:
+              - "'PREP_MARKER_WRITTEN' in (prep_marker_write.stdout | default(''))"
+            fail_msg: >-
+              Firmware marker write was not confirmed on {{ netscaler_hostname }} ({{ nsip }}).
+          delegate_to: localhost
 
         - name: Mark device prepared
           ansible.builtin.set_fact:
@@ -530,6 +562,7 @@
               'minimum_var_free_gb': minimum_var_free_gb | int,
               'parallel_devices': prep_devices_parallel | int,
               'inventory': inventory_output,
+              'skipped_non_ha_instances': prep_inventory_data.skipped_instances | default([]),
               'total_devices': prep_results | length,
               'prepared_devices': prepared_devices | length,
               'unreachable_devices': unreachable_devices | length,
@@ -550,6 +583,7 @@
         content: |
           ---
           prepared_firmware_successful: {{ (prepared_devices | length == prep_results | length) | bool | lower }}
+          prepared_target_version: "{{ netscaler_target_version }}"
           prepared_firmware_file_name: "{{ prep_firmware_name }}"
           prepared_firmware_sha256: "{{ prep_local_firmware.stat.checksum }}"
           prepared_firmware_remote_archive: "{{ prep_remote_archive }}"

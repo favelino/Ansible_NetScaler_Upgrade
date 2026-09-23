@@ -31,7 +31,8 @@ Remove old archives from `new_firmware/` and place exactly one target `.tgz` or
 `.tar.gz` file there. Configure `netscaler_target_version` in `variables.yaml`.
 
 Preparation lists the archive with `tar -tzf`, requires exactly one `installns`
-entry, uploads it to `/var/nsinstall/`, compares SHA-256 checksums, extracts it
+entry, requires its filename and internal `ns-<version>.gz` image to match
+`netscaler_target_version`, uploads it to `/var/nsinstall/`, compares SHA-256 checksums, extracts it
 with `tar -xzf`, and verifies the resulting installer path. This supports archives
 where `installns` is at the root or inside a build subdirectory.
 
@@ -61,6 +62,10 @@ Expected outputs:
 - `reports/prep-<UTC-ID>.json`: structured fleet preparation result.
 - `reports/prep-<UTC-ID>.md`: readable preparation report.
 - `prepared_firmware.yml`: Stage 2 safety gate and checksums.
+
+Standalone/non-HA Console entries are listed as skipped and do not abort
+discovery. A device claiming HA with a missing or nonreciprocal peer still
+aborts inventory generation.
 
 The summary explicitly separates:
 
@@ -112,10 +117,11 @@ The ordered sequence for each pair is:
 ```text
 validate roles
 -> disable and save haSync/haProp on both nodes
--> original Secondary upgrade and reboot
+-> full backup, original Secondary upgrade and one reboot request
+-> require target version and both local nodes UP
 -> failover
--> original Primary upgrade and reboot
--> fail back
+-> full backup, original Primary upgrade and one reboot request
+-> verified failback
 -> final version and role validation
 -> enable and save haSync/haProp on both nodes
 -> force final synchronization from the restored original Primary
@@ -126,12 +132,17 @@ through the collection's `netscaler.adc.ssh_netscaler_adc` connection plugin.
 They are not BSD shell commands. This avoids a `netscaler.adc.hanode` 2.17.0
 read defect where the NITRO endpoint can return both HA nodes for `id=0` and
 the module stops with a duplicate-primary-key error before changing anything.
-The playbook reads and validates local node 0, changes both controls, saves the
-configuration, and reads them again. The restoration is in an Ansible `always`
-section, so it is attempted even when a pair fails. If either node cannot be
-restored and verified, that pair is marked `FAILED` and the report explicitly
-requires manual recovery. A forced synchronization is performed only after both
-nodes reach the target version and the original HA roles are restored.
+The playbook always reads local node 0; it never accepts a two-node response as
+proof of a local role. If the original Secondary fails installation, boot, CLI
+validation, target-version validation, or the local `UP` gate, the original
+Primary is not upgraded and processing advances to the next scheduled pair.
+
+The recovery section reads both live versions. It re-enables HA controls only
+when the versions are known and equal and the original roles are confirmed.
+Mixed versions, an unreachable node, or ambiguous roles remain isolated and
+are marked `MANUAL_RECOVERY_REQUIRED`. If equal-version nodes are inverted,
+one conditional failback is issued and polled. A forced synchronization runs
+only after both nodes reach the target and the original roles are restored.
 
 ## 8. Confirm completion
 
@@ -159,6 +170,8 @@ but only after the reports are safely written.
   resumes with the controlled reboot and post-boot validation.
 - If the state is incomplete, inspect the persistent log named
   `/var/tmp/ansible-installns-<target>.log` before retrying.
+- A non-zero persistent `.rc` is retained. Review the log first; only then may
+  an operator authorize one retry with `-e retry_failed_installns=true`.
 - Keep the reports for audit and change-control evidence.
 
 
@@ -221,6 +234,12 @@ ha_pairs_parallel: 2
 ~~~
 
 Use trusted certificates and insecure false in production.
+
+The repository defaults (`host_key_checking=False`, SCP
+`StrictHostKeyChecking=no`, and `netscaler_validate_certs: false`) are suitable
+for this lab only. Before production, pin appliance SSH host keys, remove the
+SCP bypass options, set `host_key_checking=True`, and validate Console/NITRO TLS
+with your CA bundle. Do not reuse the lab `nsroot` password in production.
 
 ### 10.3 Validate Vault and SSH
 
@@ -339,7 +358,7 @@ ls -lt reports/prep-* | head
 sed -n '1,260p' "$(ls -t reports/prep-*.md | head -n 1)"
 
 grep -E \
-  '^(prepared_firmware_successful|prepared_device_count|expected_device_count|prepared_at):' \
+  '^(prepared_firmware_successful|prepared_target_version|prepared_device_count|expected_device_count|prepared_at):' \
   prepared_firmware.yml
 ~~~
 
@@ -347,6 +366,7 @@ Example for three pairs:
 
 ~~~yaml
 prepared_firmware_successful: true
+prepared_target_version: "14.1-73.33"
 prepared_device_count: 6
 expected_device_count: 6
 ~~~
@@ -383,24 +403,28 @@ and ha_upgrade.yaml at the same time.
 | Display | Operation |
 |---|---|
 | STEP 01/12 | Initialize result tracking and announce original roles. |
-| STEP 02/12 | Validate reachability and live roles; disable and save haSync and haProp on both nodes. |
-| STEP 03–05/12 | Upgrade, reboot, reconnect, and validate the original Secondary. |
+| STEP 02/12 | Validate reachability, local roles and local `UP` state; disable and save haSync and haProp. |
+| STEP 03–05/12 | Create a full backup; upgrade, reboot once, reconnect, and validate the original Secondary. |
 | STEP 06/12 | Fail over to the upgraded original Secondary and validate both roles. |
-| STEP 07–09/12 | Upgrade, reboot, reconnect, and validate the original Primary. |
-| STEP 10/12 | Fail back and restore original roles. |
+| STEP 07–09/12 | Create a full backup; upgrade, reboot once, reconnect, and validate the original Primary. |
+| STEP 10/12 | Fail back and poll until the original roles return. |
 | STEP 11/12 | Read final HA state from both nodes. |
 | STEP 12/12 | Validate both target versions and restored roles. |
-| Always | Re-enable and save haSync and haProp; restoration failure marks the pair failed. |
+| Always | Read live versions and roles; restore HA controls only when safe, otherwise require manual recovery. |
 | Final sync | Force synchronization from the restored original Primary. |
 
 Nodes in the same pair are never upgraded simultaneously. Two independent pair
 workflows can advance together when ha_pairs_parallel is 2.
 
 For every reboot, the playbook completes or recognizes target install state,
-issues the reboot, waits for the management IP to stop answering, waits for
-management ping, waits for management connectivity, reads the complete version
-output, and requires the exact configured target version. Ping is an initial
-return signal, not the final success criterion.
+sends exactly one reboot request, observes TCP/22 stop, waits for TCP/22 to
+return, reads the authenticated CLI version, and requires the exact target.
+An HTTP connection close is accepted only when TCP/22 subsequently stops. ICMP
+ping is optional (`reboot_ping_check_enabled`) and disabled by default.
+
+Polling occurs every five seconds and proceeds immediately on success. The
+configured timeout is a maximum, not a fixed sleep. No second reboot is sent
+when a boot exceeds the timeout.
 
 ## 12. Monitor installns and reboot
 
@@ -604,21 +628,20 @@ ansible-playbook upgrade_perform.yaml \
 ~~~
 
 The failed launch does not run `installns` and does not reboot the appliance.
-The playbook's `always` section re-enables and verifies `haSync` and
-`haProp`. A Secondary response of `Warning: The running configuration has not
-changed` during `save ns config` is treated as a successful idempotent save
-when the subsequent state verification passes.
+The recovery section first compares live versions and roles; it re-enables
+`haSync` and `haProp` only when safe. A Secondary response of `Warning: The
+running configuration has not changed` during `save ns config` is accepted only
+when subsequent state verification passes.
 
 ## 16. SSH resets while restoring HA controls
 
-A Secondary can reset TCP/22 while finishing its controlled reboot. Earlier
-versions of the playbook could reach the `always` recovery block during this
-window and stop with `UNREACHABLE`, even though the reboot itself was normal.
-The current playbook waits up to `reboot_up_timeout` for both SSH ports and
-then retries authenticated CLI operations before re-enabling, saving, and
-verifying `haSync` and `haProp`. Post-reboot version validation also retries
-until the CLI is stable. An unreachable recovery attempt is recorded as a pair
-failure but no longer prevents the final report from being written.
+A Secondary can reset TCP/22 while rebooting and the NITRO HTTP request can end
+with `Remote end closed connection without response`. That message alone is not
+a failed reboot. The current playbook verifies that TCP/22 stops, waits for it
+to return, and then polls authenticated CLI output. If the Secondary does not
+complete these checks, the original Primary is skipped and the next pair can
+continue. Reports are still written even if a pair returns no normal completion
+record.
 
 If this occurs on an older checkout, stop that controller run before it starts
 another pair, wait for both nodes, and restore the controls explicitly:
@@ -626,8 +649,9 @@ another pair, wait for both nodes, and restore the controls explicitly:
 ~~~bash
 # First Ctrl+C in the running Ansible terminal, then A to abort.
 
-ansible localhost -c local -m ansible.builtin.wait_for \
-  -a 'host=10.100.48.2 port=22 state=started delay=30 timeout=900'
+ansible -i inventory.ini localhost -c local -m ansible.builtin.wait_for \
+  -a 'host=10.100.48.2 port=22 state=started delay=5 sleep=5 timeout=600' \
+  --ask-vault-pass
 
 ansible -i inventory.ini \
   'ns_10_100_48_1:ns_10_100_48_2' \
@@ -654,7 +678,28 @@ and live roles before deciding whether the idempotent upgrade can be resumed.
 Do not force HA synchronization until both nodes are reachable, healthy, and
 running compatible versions.
 
-## 17. Audit evidence
+## 17. VM console repeats CAM/SCSI Busy during boot
+
+Messages such as these are produced by the appliance kernel, not by Ansible:
+
+~~~text
+CAM status: SCSI Status Error
+SCSI status: Busy
+Retrying command
+~~~
+
+They indicate that the guest cannot complete disk I/O during boot. The playbook
+does not send another reboot. It times out that Secondary, does not start the
+original Primary, retains HA isolation when the live versions cannot be proven
+equal, records `MANUAL_RECOVERY_REQUIRED`, and continues scheduling other pairs.
+
+For a lab, inspect the hypervisor datastore/controller and reset the affected
+VM once if your change procedure permits it. In production, treat repeated disk
+errors as an infrastructure incident: capture the console, validate storage
+latency/errors and the virtual SCSI controller, and involve the platform team.
+Do not solve recurring disk I/O faults by increasing the Ansible timeout.
+
+## 18. Audit evidence
 
 Retain:
 

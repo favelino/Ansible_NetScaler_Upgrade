@@ -9,6 +9,7 @@
 - Inventory: `{{ inventory_output }}`
 - Minimum `/var` free space: {{ minimum_var_free_gb }} GB
 - Configured concurrency: {{ prep_devices_parallel }} devices
+- Standalone/non-HA instances skipped: {{ prep_inventory_data.skipped_instances | default([]) | length }}
 - Result: **{{ 'SUCCESS' if prepared_devices | length == prep_results | length else 'FAILED' }}**
 
 | Hostname | NSIP | `/var` free | Reachable | Authenticated | Status | Detail |
@@ -18,6 +19,13 @@
 {% endfor %}
 
 ## Exceptions
+
+### Standalone/non-HA Console instances skipped
+{% for result in prep_inventory_data.skipped_instances | default([]) %}
+- {{ result.hostname }} ({{ result.nsip }}): {{ result.reason }}
+{% else %}
+- None
+{% endfor %}
 
 ### Unreachable
 {% for result in unreachable_devices %}
@@ -39,4 +47,3 @@
 {% else %}
 - None
 {% endfor %}
-

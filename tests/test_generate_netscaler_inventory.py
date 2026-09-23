@@ -111,6 +111,30 @@ class InventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(InventoryError, "not reciprocal"):
             validate_instances(nodes, require_healthy=False)
 
+    def test_skips_standalone_and_records_warning_metadata(self):
+        nodes = sample_nodes()
+        standalone = {
+            "hostname": "standalone-lab",
+            "ns_ip_address": "192.0.2.99",
+            "is_ha_configured": "false",
+        }
+        skipped = []
+        pairs = validate_instances(
+            nodes + [standalone],
+            require_healthy=False,
+            skipped_instances=skipped,
+        )
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(skipped[0]["hostname"], "standalone-lab")
+        metadata = json.loads(render_metadata(pairs, skipped))
+        self.assertEqual(metadata["skipped_instances"], skipped)
+
+    def test_still_rejects_ha_candidate_with_missing_attributes(self):
+        nodes = sample_nodes()
+        nodes[0].pop("ha_ip_address")
+        with self.assertRaisesRegex(InventoryError, "ha_ip_address"):
+            validate_instances(nodes, require_healthy=False)
+
     def test_rejects_missing_peer(self):
         with self.assertRaisesRegex(InventoryError, "missing HA peer"):
             validate_instances(sample_nodes()[:1])

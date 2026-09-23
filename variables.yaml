@@ -1,11 +1,5 @@
 # Target version used by the actual upgrade validation.
-netscaler_target_version: "13.1-49.15" # Please input this in the format: "release version-build version" Eg: "13.1-49.15"
-
-# Python path on the target NetScaler
-netscaler_python_path: /var/python/bin/python
-
-# Python path on the local machine
-local_python_path: /usr/bin/python
+netscaler_target_version: "14.1-73.33" # Format: "release-build", for example "14.1-73.33"
 
 # NetScaler Console inventory discovery. Replace the URL or override with -e.
 netscaler_console_url: "https://console.example.com"
@@ -26,14 +20,26 @@ prep_devices_parallel: 20
 # Override at runtime with: -e ha_pairs_parallel=5
 ha_pairs_parallel: 2
 
-# Connectivity, reboot, and HA stabilization timers (seconds)
+# Connectivity, reboot, installer, and HA polling timers (seconds).
+# Timeouts are maximums; successful checks continue immediately.
 netscaler_ssh_port: 22
 preflight_connect_timeout: 5
-reboot_down_timeout: 180
-reboot_up_timeout: 900
-ha_stabilization_seconds: 60
+reboot_request_timeout: 30
+reboot_down_timeout: 120
+reboot_up_timeout: 600
+reboot_ssh_initial_delay: 5
+reboot_poll_interval: 5
+post_reboot_cli_timeout: 180
+reboot_ping_check_enabled: false
+ha_transition_timeout: 180
+ha_poll_interval: 5
+recovery_probe_timeout: 60
 upgrade_install_timeout: 3600
 upgrade_poll_interval: 15
+
+# Safety controls.
+create_pre_upgrade_backup: true
+retry_failed_installns: false
 
 # NITRO reboot endpoint. HTTPS is recommended.
 netscaler_management_protocol: https

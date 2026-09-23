@@ -102,14 +102,31 @@ def validate_instances(
     instances: Iterable[dict[str, Any]],
     *,
     require_healthy: bool = True,
+    skipped_instances: list[dict[str, str]] | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    """Validate HA health and return sorted (Primary, Secondary) pairs."""
+    """Validate HA health and return sorted pairs, skipping non-HA appliances."""
     nodes = list(instances)
     if not nodes:
         raise InventoryError("Console returned no NetScaler instances")
 
     by_ip: dict[str, dict[str, Any]] = {}
     for node in nodes:
+        if not _text(node.get("is_ha_configured")):
+            raise InventoryError(
+                f"Instance {_text(node.get('hostname')) or '<unknown>'} is missing: "
+                "is_ha_configured"
+            )
+        if _text(node.get("is_ha_configured")).lower() not in {"true", "yes", "1"}:
+            if skipped_instances is not None:
+                skipped_instances.append(
+                    {
+                        "hostname": _text(node.get("hostname")) or "<unknown>",
+                        "nsip": _text(node.get("ns_ip_address")) or "unknown",
+                        "reason": "not configured for two-node HA",
+                    }
+                )
+            continue
+
         missing = [name for name in ATTRS if not _text(node.get(name))]
         if missing:
             raise InventoryError(
@@ -126,8 +143,6 @@ def validate_instances(
             raise InventoryError(f"Duplicate ns_ip_address in Console response: {nsip}")
         if require_healthy and _text(node["instance_state"]).lower() != "up":
             raise InventoryError(f"{hostname} ({nsip}) is not Up")
-        if _text(node["is_ha_configured"]).lower() not in {"true", "yes", "1"}:
-            raise InventoryError(f"{hostname} ({nsip}) is not configured for HA")
         if role not in EXPECTED_SYNC:
             raise InventoryError(f"{hostname} ({nsip}) has invalid HA role {node['ha_master_state']!r}")
         if require_healthy and sync != EXPECTED_SYNC[role]:
@@ -136,6 +151,9 @@ def validate_instances(
                 f"{EXPECTED_SYNC[role]!r} for {role.title()}"
             )
         by_ip[nsip] = node
+
+    if not by_ip:
+        raise InventoryError("Console returned no two-node HA instances")
 
     pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     visited: set[str] = set()
@@ -211,7 +229,10 @@ def render_inventory(pairs: Iterable[tuple[dict[str, Any], dict[str, Any]]]) -> 
     return "\n".join(lines) + "\n"
 
 
-def render_metadata(pairs: Iterable[tuple[dict[str, Any], dict[str, Any]]]) -> str:
+def render_metadata(
+    pairs: Iterable[tuple[dict[str, Any], dict[str, Any]]],
+    skipped_instances: Iterable[dict[str, str]] = (),
+) -> str:
     """Return machine-readable host and pair data for upgrade_prep.yaml."""
     nodes: list[dict[str, str]] = []
     pair_records: list[dict[str, str]] = []
@@ -240,7 +261,15 @@ def render_metadata(pairs: Iterable[tuple[dict[str, Any], dict[str, Any]]]) -> s
                 "secondary_nsip": _text(secondary["ns_ip_address"]),
             }
         )
-    return json.dumps({"nodes": nodes, "pairs": pair_records}, indent=2, sort_keys=True) + "\n"
+    return json.dumps(
+        {
+            "nodes": nodes,
+            "pairs": pair_records,
+            "skipped_instances": list(skipped_instances),
+        },
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
 
 
 def write_inventory(path: Path, content: str, *, force: bool = False) -> None:
@@ -321,13 +350,24 @@ def main(argv: list[str] | None = None) -> int:
                 timeout=args.timeout,
             )
 
-        pairs = validate_instances(instances, require_healthy=not args.allow_unhealthy)
+        skipped_instances: list[dict[str, str]] = []
+        pairs = validate_instances(
+            instances,
+            require_healthy=not args.allow_unhealthy,
+            skipped_instances=skipped_instances,
+        )
         write_inventory(args.output, render_inventory(pairs), force=args.force)
         if args.metadata_output:
             write_inventory(
                 args.metadata_output,
-                render_metadata(pairs),
+                render_metadata(pairs, skipped_instances),
                 force=args.force,
+            )
+        for skipped in skipped_instances:
+            print(
+                f"WARNING: skipped {skipped['hostname']} ({skipped['nsip']}): "
+                f"{skipped['reason']}",
+                file=sys.stderr,
             )
         print(f"Wrote {args.output} with {len(pairs)} validated HA pair(s).")
         return 0

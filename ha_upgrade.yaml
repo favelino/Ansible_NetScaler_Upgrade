@@ -26,11 +26,12 @@
         that:
           - prepared_firmware_successful | bool
           - prepared_device_count | int == expected_device_count | int
+          - prepared_target_version | default('NOT_PREPARED') == netscaler_target_version
           - perform_inventory_stat.stat.exists | bool
           - perform_inventory_stat.stat.checksum == prepared_inventory_sha256
         fail_msg: >-
           The preparation gate is not valid. Run upgrade_prep.yaml successfully
-          and do not modify inventory.ini between preparation and upgrade.
+          and do not modify inventory.ini or the target version between stages.
         success_msg: >-
           Preparation gate accepted for {{ prepared_device_count }} devices.
           Firmware SHA-256={{ prepared_firmware_sha256 }}.
@@ -121,6 +122,7 @@
   gather_facts: false
   serial: "{{ ha_pairs_parallel | int }}"
   max_fail_percentage: 100
+  ignore_unreachable: true
   vars_files:
     - variables.yaml
     - "{{ lookup('ansible.builtin.first_found', {'files': ['prepared_firmware.yml', 'prepared_firmware.yml.example'], 'paths': [playbook_dir]}) }}"
@@ -132,6 +134,7 @@
         pair_versions: {}
         ha_controls_change_started: false
         ha_controls_restored: false
+        pair_manual_recovery: false
         pair_started_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
         pair_started_epoch: "{{ lookup('pipe', 'date -u +%s') | int }}"
 
@@ -156,25 +159,25 @@
 
         - name: "STEP 02/12 | {{ pair_name }} | Confirm original Primary role is still current"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc show ha node
+            ssh_netscaler_adc show ha node 0
           delegate_to: "{{ primary_host }}"
           register: initial_primary_ha
           changed_when: false
-          no_log: true
 
         - name: "STEP 02/12 | {{ pair_name }} | Confirm original Secondary role is still current"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc show ha node
+            ssh_netscaler_adc show ha node 0
           delegate_to: "{{ secondary_host }}"
           register: initial_secondary_ha
           changed_when: false
-          no_log: true
 
         - name: "STEP 02/12 | {{ pair_name }} | Reject stale HA role data"
           ansible.builtin.assert:
             that:
               - initial_primary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Primary')
               - initial_secondary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Secondary')
+              - initial_primary_ha.stdout is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+              - initial_secondary_ha.stdout is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
             fail_msg: >-
               Live HA roles no longer match inventory.ini. Run upgrade_prep.yaml again
               before attempting this pair.
@@ -277,35 +280,63 @@
             upgrade_role_label: Original Secondary
             upgrade_step_range: "03-05"
 
+        - name: "STEP 06/12 | {{ pair_name }} | Read both local states before failover"
+          ansible.builtin.raw: ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          register: pre_failover_health
+          changed_when: false
+
+        - name: "STEP 06/12 | {{ pair_name }} | Require both nodes UP before failover"
+          ansible.builtin.assert:
+            that:
+              - (item.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+              - >-
+                (item.item == primary_host and
+                 (item.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$'))
+                or
+                (item.item == secondary_host and
+                 (item.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$'))
+            fail_msg: >-
+              {{ hostvars[item.item].netscaler_hostname | default(item.item) }} is not
+              locally UP in its expected pre-failover role. The original Primary
+              will not be upgraded.
+          loop: "{{ pre_failover_health.results }}"
+
         - name: "STEP 06/12 | {{ pair_name }} | Fail over to upgraded Secondary"
           ansible.builtin.raw: >-
             ssh_netscaler_adc force ha failover -force
           delegate_to: "{{ secondary_host }}"
           register: first_failover
           changed_when: true
-          no_log: true
-
-        - name: "STEP 06/12 | {{ pair_name }} | Wait for HA stabilization"
-          ansible.builtin.wait_for:
-            timeout: "{{ ha_stabilization_seconds }}"
-          delegate_to: localhost
-
 
         - name: "STEP 06/12 | {{ pair_name }} | Confirm original Secondary is now Primary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc show ha node
+            ssh_netscaler_adc show ha node 0
           delegate_to: "{{ secondary_host }}"
           register: failover_secondary_ha
+          until:
+            - failover_secondary_ha.rc | default(1) == 0
+            - (failover_secondary_ha.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
+            - (failover_secondary_ha.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+          retries: "{{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}"
+          delay: "{{ ha_poll_interval }}"
           changed_when: false
-          no_log: true
 
         - name: "STEP 06/12 | {{ pair_name }} | Confirm original Primary is now Secondary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc show ha node
+            ssh_netscaler_adc show ha node 0
           delegate_to: "{{ primary_host }}"
           register: failover_primary_ha
+          until:
+            - failover_primary_ha.rc | default(1) == 0
+            - (failover_primary_ha.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$')
+            - (failover_primary_ha.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+          retries: "{{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}"
+          delay: "{{ ha_poll_interval }}"
           changed_when: false
-          no_log: true
 
         - name: "STEP 06/12 | {{ pair_name }} | Verify failover before upgrading original Primary"
           ansible.builtin.assert:
@@ -324,34 +355,62 @@
             upgrade_role_label: Original Primary
             upgrade_step_range: "07-09"
 
+        - name: "STEP 10/12 | {{ pair_name }} | Read both local states before failback"
+          ansible.builtin.raw: ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          register: pre_failback_health
+          changed_when: false
+
+        - name: "STEP 10/12 | {{ pair_name }} | Require both nodes UP in inverted roles"
+          ansible.builtin.assert:
+            that:
+              - (item.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+              - >-
+                (item.item == primary_host and
+                 (item.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$'))
+                or
+                (item.item == secondary_host and
+                 (item.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$'))
+            fail_msg: >-
+              {{ hostvars[item.item].netscaler_hostname | default(item.item) }} is not
+              locally UP in its expected pre-failback role. No blind failover was sent.
+          loop: "{{ pre_failback_health.results }}"
+
         - name: "STEP 10/12 | {{ pair_name }} | Restore original HA roles"
           ansible.builtin.raw: >-
             ssh_netscaler_adc force ha failover -force
           delegate_to: "{{ primary_host }}"
           register: restore_failover
           changed_when: true
-          no_log: true
-
-        - name: "STEP 10/12 | {{ pair_name }} | Wait for final HA stabilization"
-          ansible.builtin.wait_for:
-            timeout: "{{ ha_stabilization_seconds }}"
-          delegate_to: localhost
 
         - name: "STEP 11/12 | {{ pair_name }} | Read final HA state from original Primary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc show ha node
+            ssh_netscaler_adc show ha node 0
           delegate_to: "{{ primary_host }}"
           register: final_primary_ha
+          until:
+            - final_primary_ha.rc | default(1) == 0
+            - (final_primary_ha.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
+            - (final_primary_ha.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+          retries: "{{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}"
+          delay: "{{ ha_poll_interval }}"
           changed_when: false
-          no_log: true
 
         - name: "STEP 11/12 | {{ pair_name }} | Read final HA state from original Secondary"
           ansible.builtin.raw: >-
-            ssh_netscaler_adc show ha node
+            ssh_netscaler_adc show ha node 0
           delegate_to: "{{ secondary_host }}"
           register: final_secondary_ha
+          until:
+            - final_secondary_ha.rc | default(1) == 0
+            - (final_secondary_ha.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$')
+            - (final_secondary_ha.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+          retries: "{{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}"
+          delay: "{{ ha_poll_interval }}"
           changed_when: false
-          no_log: true
 
         - name: "STEP 12/12 | {{ pair_name }} | Validate versions and restored roles"
           ansible.builtin.assert:
@@ -382,26 +441,176 @@
             msg: "FAILED | {{ pair_name }} | {{ pair_error }}"
 
       always:
-        - name: Wait for both nodes to accept SSH before HA restoration
-          ansible.builtin.wait_for:
-            host: "{{ hostvars[item].ansible_host | default(hostvars[item].nsip) }}"
-            port: "{{ netscaler_ssh_port }}"
-            state: started
-            delay: 30
-            connect_timeout: 5
-            timeout: "{{ reboot_up_timeout }}"
-          delegate_to: localhost
-          loop:
-            - "{{ primary_host }}"
-            - "{{ secondary_host }}"
-          loop_control:
-            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
-          register: ha_restore_connectivity
-          when: ha_controls_change_started | default(false) | bool
+        - name: Read live original Primary version for safe recovery
+          ansible.builtin.raw: ssh_netscaler_adc show ns version
+          delegate_to: "{{ primary_host }}"
+          register: recovery_primary_version_raw
+          until:
+            - not (recovery_primary_version_raw.unreachable | default(false))
+            - recovery_primary_version_raw.rc | default(1) == 0
+          retries: >-
+            {{ ((recovery_probe_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
           changed_when: false
+          failed_when: false
           ignore_errors: true
+          ignore_unreachable: true
+          when: ha_controls_change_started | default(false) | bool
 
-        - name: Restore HA synchronization and command propagation
+        - name: Read live original Secondary version for safe recovery
+          ansible.builtin.raw: ssh_netscaler_adc show ns version
+          delegate_to: "{{ secondary_host }}"
+          register: recovery_secondary_version_raw
+          until:
+            - not (recovery_secondary_version_raw.unreachable | default(false))
+            - recovery_secondary_version_raw.rc | default(1) == 0
+          retries: >-
+            {{ ((recovery_probe_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
+          changed_when: false
+          failed_when: false
+          ignore_errors: true
+          ignore_unreachable: true
+          when: ha_controls_change_started | default(false) | bool
+
+        - name: Parse live versions and decide whether HA restoration is safe
+          ansible.builtin.set_fact:
+            recovery_primary_version_matches: >-
+              {{ recovery_primary_version_raw.stdout | default('')
+                 | regex_findall('(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)') }}
+            recovery_secondary_version_matches: >-
+              {{ recovery_secondary_version_raw.stdout | default('')
+                 | regex_findall('(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)') }}
+          when: ha_controls_change_started | default(false) | bool
+
+        - name: Calculate live recovery versions
+          ansible.builtin.set_fact:
+            recovery_primary_version: >-
+              {{ recovery_primary_version_matches[0][0] ~ '-' ~ recovery_primary_version_matches[0][1]
+                 if recovery_primary_version_matches | default([]) | length else 'unknown' }}
+            recovery_secondary_version: >-
+              {{ recovery_secondary_version_matches[0][0] ~ '-' ~ recovery_secondary_version_matches[0][1]
+                 if recovery_secondary_version_matches | default([]) | length else 'unknown' }}
+          when: ha_controls_change_started | default(false) | bool
+
+        - name: Determine whether both live versions match
+          ansible.builtin.set_fact:
+            ha_versions_match: >-
+              {{ recovery_primary_version != 'unknown'
+                 and recovery_secondary_version != 'unknown'
+                 and recovery_primary_version == recovery_secondary_version }}
+          when: ha_controls_change_started | default(false) | bool
+
+        - name: Keep mixed or unknown versions isolated for manual recovery
+          ansible.builtin.set_fact:
+            pair_status: MANUAL_RECOVERY_REQUIRED
+            pair_manual_recovery: true
+            pair_error: >-
+              {{ (pair_error ~ '; ' if pair_error | length else '') ~
+                 'HA isolation was intentionally retained because live versions do not match or a node is unreachable: Primary=' ~
+                 recovery_primary_version ~ ', Secondary=' ~ recovery_secondary_version ~
+                 '. The original Primary was not upgraded after a Secondary failure.' }}
+          when:
+            - ha_controls_change_started | default(false) | bool
+            - not (ha_versions_match | default(false) | bool)
+
+        - name: Read original Primary local role before recovery failback
+          ansible.builtin.raw: ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ primary_host }}"
+          register: recovery_primary_role
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+          when: ha_versions_match | default(false) | bool
+
+        - name: Read original Secondary local role before recovery failback
+          ansible.builtin.raw: ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ secondary_host }}"
+          register: recovery_secondary_role
+          changed_when: false
+          failed_when: false
+          ignore_unreachable: true
+          when: ha_versions_match | default(false) | bool
+
+        - name: Classify current recovery roles
+          ansible.builtin.set_fact:
+            recovery_roles_original: >-
+              {{ (recovery_primary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
+                 and (recovery_secondary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$') }}
+            recovery_roles_inverted: >-
+              {{ (recovery_primary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$')
+                 and (recovery_secondary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$') }}
+          when: ha_versions_match | default(false) | bool
+
+        - name: Restore original roles when both upgraded nodes are inverted
+          ansible.builtin.raw: ssh_netscaler_adc force ha failover -force
+          delegate_to: "{{ primary_host }}"
+          register: recovery_failback
+          changed_when: true
+          ignore_errors: true
+          ignore_unreachable: true
+          when:
+            - ha_versions_match | default(false) | bool
+            - recovery_roles_inverted | default(false) | bool
+
+        - name: Confirm original Primary role after recovery failback
+          ansible.builtin.raw: ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ primary_host }}"
+          register: recovery_final_primary_role
+          until:
+            - recovery_final_primary_role.rc | default(1) == 0
+            - (recovery_final_primary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
+            - (recovery_final_primary_role.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+          retries: >-
+            {{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
+          changed_when: false
+          failed_when: false
+          ignore_errors: true
+          ignore_unreachable: true
+          when:
+            - ha_versions_match | default(false) | bool
+            - (recovery_roles_original | default(false) | bool) or (recovery_roles_inverted | default(false) | bool)
+
+        - name: Confirm original Secondary role after recovery failback
+          ansible.builtin.raw: ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ secondary_host }}"
+          register: recovery_final_secondary_role
+          until:
+            - recovery_final_secondary_role.rc | default(1) == 0
+            - (recovery_final_secondary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$')
+            - (recovery_final_secondary_role.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+          retries: >-
+            {{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
+          changed_when: false
+          failed_when: false
+          ignore_errors: true
+          ignore_unreachable: true
+          when:
+            - ha_versions_match | default(false) | bool
+            - (recovery_roles_original | default(false) | bool) or (recovery_roles_inverted | default(false) | bool)
+
+        - name: Permit HA restoration only with matching versions and original roles
+          ansible.builtin.set_fact:
+            ha_restore_safe: >-
+              {{ ha_versions_match | default(false) | bool
+                 and (recovery_final_primary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
+                 and (recovery_final_secondary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$') }}
+          when: ha_controls_change_started | default(false) | bool
+
+        - name: Keep matching-version nodes isolated when original roles are not confirmed
+          ansible.builtin.set_fact:
+            pair_status: MANUAL_RECOVERY_REQUIRED
+            pair_manual_recovery: true
+            pair_error: >-
+              {{ (pair_error ~ '; ' if pair_error | length else '') ~
+                 'Both nodes have the same version, but the original Primary/Secondary roles could not be confirmed. HA isolation was retained.' }}
+          when:
+            - ha_versions_match | default(false) | bool
+            - not (ha_restore_safe | default(false) | bool)
+
+        - name: Restore HA synchronization and command propagation when versions match
           ansible.builtin.raw: >-
             ssh_netscaler_adc set ha node -hasync ENABLED -haprop ENABLED
           delegate_to: "{{ item }}"
@@ -411,12 +620,15 @@
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
           register: ha_restore_commands
-          when: ha_controls_change_started | default(false) | bool
+          when:
+            - ha_controls_change_started | default(false) | bool
+            - ha_restore_safe | default(false) | bool
           until:
             - not (ha_restore_commands.unreachable | default(false))
             - ha_restore_commands.rc | default(1) == 0
-          retries: 12
-          delay: 10
+          retries: >-
+            {{ ((recovery_probe_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
           changed_when: true
           ignore_errors: true
           ignore_unreachable: true
@@ -431,7 +643,9 @@
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
           register: ha_restore_save_commands
-          when: ha_controls_change_started | default(false) | bool
+          when:
+            - ha_controls_change_started | default(false) | bool
+            - ha_restore_safe | default(false) | bool
           changed_when: >-
             ha_restore_save_commands.rc == 0
             and 'running configuration has not changed' not in
@@ -443,8 +657,9 @@
             ha_restore_save_commands.rc | default(1) == 0
             or 'running configuration has not changed' in
                (ha_restore_save_commands.stdout | default('') | lower)
-          retries: 12
-          delay: 10
+          retries: >-
+            {{ ((recovery_probe_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
           ignore_errors: true
           ignore_unreachable: true
 
@@ -458,13 +673,16 @@
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
           register: ha_restored_local_controls
-          when: ha_controls_change_started | default(false) | bool
+          when:
+            - ha_controls_change_started | default(false) | bool
+            - ha_restore_safe | default(false) | bool
           until:
             - not (ha_restored_local_controls.unreachable | default(false))
             - ha_restored_local_controls.rc | default(1) == 0
             - (ha_restored_local_controls.stdout | default('')) is search('(?im)^\\s*Propagation\\s*:\\s*ENABLED\\s*$')
-          retries: 12
-          delay: 10
+          retries: >-
+            {{ ((recovery_probe_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
           changed_when: false
           ignore_errors: true
           ignore_unreachable: true
@@ -482,16 +700,16 @@
           loop_control:
             label: "{{ hostvars[item.item].netscaler_hostname | default(item.item) }} ({{ hostvars[item.item].nsip }})"
           register: ha_restore_verification
-          when: ha_controls_change_started | default(false) | bool
+          when:
+            - ha_controls_change_started | default(false) | bool
+            - ha_restore_safe | default(false) | bool
           ignore_errors: true
 
         - name: Record HA controls restoration state
           ansible.builtin.set_fact:
             ha_controls_restored: >-
               {{
-                not (ha_restore_connectivity.failed | default(false))
-                and not (ha_restore_connectivity.unreachable | default(false))
-                and not (ha_restore_commands.failed | default(false))
+                not (ha_restore_commands.failed | default(false))
                 and not (ha_restore_commands.unreachable | default(false))
                 and not (ha_restore_save_commands.failed | default(false))
                 and not (ha_restore_save_commands.unreachable | default(false))
@@ -500,16 +718,20 @@
                 and not (ha_restore_verification.failed | default(false))
                 and (ha_restored_local_controls.results | default([]) | length == 2)
               }}
-          when: ha_controls_change_started | default(false) | bool
+          when:
+            - ha_controls_change_started | default(false) | bool
+            - ha_restore_safe | default(false) | bool
 
-        - name: Mark pair failed when HA controls could not be restored
+        - name: Require manual recovery when matching-version HA controls could not be restored
           ansible.builtin.set_fact:
-            pair_status: FAILED
+            pair_status: MANUAL_RECOVERY_REQUIRED
+            pair_manual_recovery: true
             pair_error: >-
               {{ (pair_error ~ '; ' if pair_error | length else '') ~
                  'HA synchronization or command propagation could not be re-enabled on both nodes. Manual recovery is required.' }}
           when:
             - ha_controls_change_started | default(false) | bool
+            - ha_restore_safe | default(false) | bool
             - not (ha_controls_restored | default(false) | bool)
 
         - name: Force final HA synchronization from restored original Primary
@@ -580,12 +802,27 @@
 
     - name: Collect every pair result
       ansible.builtin.set_fact:
-        upgrade_results: "{{ upgrade_results + [hostvars[item].pair_result] }}"
+        upgrade_results: >-
+          {{ upgrade_results + [hostvars[item].pair_result
+             | default({'pair': hostvars[item].pair_name | default(item),
+                        'status': 'MANUAL_RECOVERY_REQUIRED',
+                        'original_primary': hostvars[item].primary_nsip | default('unknown'),
+                        'original_secondary': hostvars[item].secondary_nsip | default('unknown'),
+                        'target_version': netscaler_target_version,
+                        'primary_before': 'unknown',
+                        'primary_after': 'unknown',
+                        'secondary_before': 'unknown',
+                        'secondary_after': 'unknown',
+                        'started_at': upgrade_run_started,
+                        'ended_at': lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ'),
+                        'duration_seconds': 0,
+                        'error': 'The pair stopped before returning a completion record. Inspect both nodes; HA isolation may still be active.'})] }}
       loop: "{{ groups['netscaler_ha_pairs'] }}"
 
     - name: Calculate final counts
       ansible.builtin.set_fact:
         successful_pairs: "{{ upgrade_results | selectattr('status', 'equalto', 'SUCCESS') | list }}"
+        manual_recovery_pairs: "{{ upgrade_results | selectattr('status', 'equalto', 'MANUAL_RECOVERY_REQUIRED') | list }}"
         failed_pairs: "{{ upgrade_results | rejectattr('status', 'equalto', 'SUCCESS') | list }}"
         upgrade_run_ended: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
         upgrade_run_duration: >-
@@ -605,6 +842,7 @@
               'firmware_sha256': prepared_firmware_sha256,
               'parallel_pairs': ha_pairs_parallel | int,
               'successful_pairs': successful_pairs | length,
+              'manual_recovery_pairs': manual_recovery_pairs | length,
               'failed_pairs': failed_pairs | length,
               'results': upgrade_results} | to_nice_json }}
 
@@ -627,4 +865,3 @@
         that:
           - failed_pairs | length == 0
         success_msg: "SUCCESS: every HA pair passed final version and role validation."
-

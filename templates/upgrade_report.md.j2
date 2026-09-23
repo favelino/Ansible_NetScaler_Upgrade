@@ -11,6 +11,7 @@
 - Result: **{{ 'SUCCESS' if failed_pairs | length == 0 else 'FAILED' }}**
 - Successful pairs: {{ successful_pairs | length }}
 - Failed pairs: {{ failed_pairs | length }}
+- Manual recovery required: {{ manual_recovery_pairs | length }}
 
 | HA pair | Original Primary | Original Secondary | Primary version | Secondary version | Duration | Status |
 |---|---|---|---|---|---:|---|

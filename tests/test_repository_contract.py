@@ -69,7 +69,16 @@ class RepositoryContractTests(unittest.TestCase):
         node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
         self.assertIn("Enforce successful preparation gate", playbook)
         self.assertIn("prepared_inventory_sha256", playbook)
+        self.assertIn("prepared_target_version", playbook)
         self.assertIn("prepared_firmware_remote_marker", node_tasks)
+
+    def test_preparation_binds_filename_image_and_target_version(self):
+        prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
+        example = (ROOT / "prepared_firmware.yml.example").read_text(encoding="utf-8")
+        self.assertIn("prep_filename_version_matches", prep)
+        self.assertIn("prep_target_image_matches", prep)
+        self.assertIn("prepared_target_version", prep)
+        self.assertIn("prepared_target_version", example)
 
     def test_playbook_limits_parallelism_by_pair(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
@@ -103,19 +112,21 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("Propagation", playbook)
         self.assertIn("Verify restored HA controls", playbook)
         self.assertIn(
-            "Wait for both nodes to accept SSH before HA restoration", playbook
+            "Permit HA restoration only with matching versions and original roles",
+            playbook,
         )
-        self.assertIn("ha_restore_connectivity.failed", playbook)
+        self.assertIn("MANUAL_RECOVERY_REQUIRED", playbook)
+        self.assertIn("recovery_primary_version == recovery_secondary_version", playbook)
         self.assertIn("ha_restore_commands.unreachable", playbook)
         self.assertGreaterEqual(playbook.count("ignore_unreachable: true"), 4)
-        self.assertGreaterEqual(playbook.count("retries: 12"), 3)
         self.assertIn("ignore_errors: true", playbook)
         self.assertNotIn("ssh_netscaler_adc nscli", playbook)
-        self.assertEqual(playbook.count("ssh_netscaler_adc show ha node"), 9)
-        self.assertEqual(playbook.count("ssh_netscaler_adc show ha node 0"), 3)
+        self.assertNotRegex(playbook, r"ssh_netscaler_adc show ha node\s*(?:\n|$)(?!\s*0)")
+        self.assertGreaterEqual(playbook.count("ssh_netscaler_adc show ha node 0"), 9)
         self.assertEqual(
-            playbook.count("ssh_netscaler_adc force ha failover -force"), 2
+            playbook.count("ssh_netscaler_adc force ha failover -force"), 3
         )
+        self.assertIn("Restore original roles when both upgraded nodes are inverted", playbook)
         self.assertEqual(playbook.count("ssh_netscaler_adc force ha sync"), 1)
 
     def test_playbook_writes_reports_before_final_assertion(self):
@@ -133,7 +144,9 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("\n      async:", node_tasks)
         self.assertIn("INSTALLNS_STAGED", node_tasks)
         self.assertIn("INSTALLNS_RUNNING", node_tasks)
-        self.assertIn("node_install_status.rc | default(1)", node_tasks)
+        self.assertIn("INSTALLNS_RC_PENDING", node_tasks)
+        self.assertIn("INSTALLNS_FAILED", node_tasks)
+        self.assertIn("retry_failed_installns", node_tasks)
         self.assertGreaterEqual(node_tasks.count("ansible.builtin.raw:"), 10)
         self.assertEqual(node_tasks.count("ssh_netscaler_adc show ns version"), 2)
         self.assertNotIn("ssh_netscaler_adc nscli", node_tasks)
@@ -146,18 +159,23 @@ class RepositoryContractTests(unittest.TestCase):
             "cd {{ (prepared_firmware_remote_installns | dirname) | quote }}",
             node_tasks,
         )
-        self.assertIn("cat {{ node_install_rc | quote }}", node_tasks)
+        self.assertIn("INSTALLNS_RC=$rc", node_tasks)
         self.assertNotIn("{{ ('cat ' ~ node_install_rc) | quote }}", node_tasks)
         self.assertNotIn("{{ ('rm -f ' ~ node_install_log", node_tasks)
         self.assertIn("without remote Python", node_tasks)
-        self.assertIn("Wait for management IP to answer ping", node_tasks)
+        self.assertIn("Optional management ping", node_tasks)
+        self.assertIn("reboot_ping_check_enabled", node_tasks)
+        self.assertIn("failed_when: false", node_tasks)
+        self.assertIn("No second reboot was sent", node_tasks)
+        self.assertIn("create system backup", node_tasks)
+        self.assertIn("-level full", node_tasks)
         self.assertIn("node_version_after_raw.unreachable", node_tasks)
         self.assertIn("ignore_unreachable: true", node_tasks)
         self.assertIn("nohup /bin/sh", node_tasks)
         self.assertNotIn("ansible.builtin.shell:", node_tasks)
         self.assertIn("Start installns without remote Python", node_tasks)
         self.assertIn("/var/nsinstall/installns_state", node_tasks)
-        self.assertEqual(node_tasks.count("regex_findall"), 2)
+        self.assertGreaterEqual(node_tasks.count("regex_findall"), 3)
         self.assertEqual(node_tasks.count("show ns version"), 2)
         version_pattern = r"(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)"
         self.assertEqual(node_tasks.count(version_pattern), 2)
@@ -168,8 +186,33 @@ class RepositoryContractTests(unittest.TestCase):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
         node_tasks = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
         self.assertNotIn("nitro_pass=", playbook)
-        self.assertGreaterEqual(playbook.count("no_log: true"), 4)
-        self.assertGreaterEqual(node_tasks.count("no_log: true"), 3)
+        self.assertIn("X-NITRO-PASS", node_tasks)
+        reboot_section = node_tasks.split("Request one reboot", 1)[1].split(
+            "Confirm {{ upgrade_role_label }} actually started rebooting", 1
+        )[0]
+        self.assertIn("no_log: true", reboot_section)
+
+    def test_local_ha_role_fixtures_do_not_confuse_combined_output(self):
+        fixtures = ROOT / "tests" / "fixtures"
+        primary = (fixtures / "show_ha_node_0_primary.txt").read_text()
+        secondary = (fixtures / "show_ha_node_0_secondary.txt").read_text()
+        combined = (fixtures / "show_ha_node_all.txt").read_text()
+        primary_pattern = r"(?im)^\s*Master State\s*:\s*Primary\s*$"
+        secondary_pattern = r"(?im)^\s*Master State\s*:\s*Secondary\s*$"
+        self.assertRegex(primary, primary_pattern)
+        self.assertNotRegex(primary, secondary_pattern)
+        self.assertRegex(secondary, secondary_pattern)
+        self.assertNotRegex(secondary, primary_pattern)
+        self.assertRegex(combined, primary_pattern)
+        self.assertRegex(combined, secondary_pattern)
+
+    def test_secondary_failure_blocks_primary_upgrade(self):
+        playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
+        upgrade_secondary = playbook.index("Upgrade original Secondary")
+        require_health = playbook.index("Require both nodes UP before failover")
+        upgrade_primary = playbook.index("Upgrade original Primary")
+        self.assertLess(upgrade_secondary, require_health)
+        self.assertLess(require_health, upgrade_primary)
 
 
 if __name__ == "__main__":

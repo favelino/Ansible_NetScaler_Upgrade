@@ -1,0 +1,7 @@
+1)      Node ID:      0
+        IP:     10.100.49.2 (NETSCALER-4)
+        Node State: UP
+        Master State: Secondary
+        Sync State: SUCCESS
+        Propagation: ENABLED
+
