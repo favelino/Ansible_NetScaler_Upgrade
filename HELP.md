@@ -417,10 +417,12 @@ and ha_upgrade.yaml at the same time.
 Nodes in the same pair are never upgraded simultaneously. Two independent pair
 workflows can advance together when ha_pairs_parallel is 2.
 
-For every reboot, the playbook completes or recognizes target install state,
-sends exactly one reboot request, observes TCP/22 stop, waits for TCP/22 to
-return, requires a 180-second post-SSH stabilization window, then polls the
-authenticated CLI for up to 600 seconds and requires the exact target.
+For every reboot, the playbook requires a zero installer return code, completed
+target install state, a target kernel under `/flash`, and a matching kernel
+selection in `/flash/boot/loader.conf`. Only then does it send exactly one
+reboot request, observe TCP/22 stop, wait for TCP/22 to return, require a
+180-second post-SSH stabilization window, and poll the authenticated CLI for up
+to 600 seconds for the exact target.
 An HTTP connection close is accepted only when TCP/22 subsequently stops. ICMP
 ping is optional (`reboot_ping_check_enabled`) and disabled by default.
 
@@ -455,9 +457,18 @@ Interpretation:
 
 - Active installns: do not manually reboot or launch another installer.
 - Missing return-code file: installation has not published completion.
-- Return code 0: firmware staging completed successfully.
-- Target VERSION plus END_TIME: a retry can resume at controlled reboot.
+- Return code 0: the installer process exited successfully, but this alone does
+  not authorize a reboot.
+- A retry resumes at controlled reboot only when return code 0, target VERSION,
+  END_TIME, target `/flash` kernel, and target `loader.conf` entry all agree.
 - Non-zero return code: inspect the persistent log before retrying.
+
+The playbook preserves the last 200 installer-log lines and the pre-reboot boot
+evidence on the controller:
+
+~~~bash
+ls -lt reports/upgrade-*-installns.txt reports/upgrade-*-postboot.txt
+~~~
 
 ## 13. Completion and reports
 
@@ -489,9 +500,9 @@ cat /var/tmp/ansible-installns-14.1-73.33.rc
 grep -E '^(VERSION|END_TIME)' /var/nsinstall/installns_state
 ~~~
 
-Never launch a second installns while one is active. Matching target VERSION and
-END_TIME allow the playbook to skip duplicate installation and continue with
-controlled reboot and validation.
+Never launch a second installns while one is active. Target VERSION and END_TIME
+without a matching return code, target kernel, and loader entry are treated as
+stale or incomplete state; the playbook does not reboot from that evidence.
 
 If HA control restoration fails, manually confirm original roles, haSync
 ENABLED, haProp ENABLED, healthy RPC/HA state, and configuration synchronization
