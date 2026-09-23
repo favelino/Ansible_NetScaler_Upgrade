@@ -116,6 +116,7 @@ The ordered sequence for each pair is:
 
 ```text
 validate roles
+-> normalize, save, and synchronize haSync/haProp when a prior run left partial isolation
 -> disable and save haSync/haProp on both nodes
 -> full backup, original Secondary upgrade and one reboot request
 -> require target version and both local nodes UP
@@ -403,7 +404,7 @@ and ha_upgrade.yaml at the same time.
 | Display | Operation |
 |---|---|
 | STEP 01/12 | Initialize result tracking and announce original roles. |
-| STEP 02/12 | Validate reachability, local roles and local `UP` state; disable and save haSync and haProp. |
+| STEP 02/12 | Validate matching versions, reachability, local roles and `UP`; reconcile a partial prior isolation; force sync; then disable and save haSync/haProp. |
 | STEP 03–05/12 | Create a full backup; upgrade, reboot once, reconnect, and validate the original Secondary. |
 | STEP 06/12 | Fail over to the upgraded original Secondary and validate both roles. |
 | STEP 07–09/12 | Create a full backup; upgrade, reboot once, reconnect, and validate the original Primary. |
@@ -418,13 +419,15 @@ workflows can advance together when ha_pairs_parallel is 2.
 
 For every reboot, the playbook completes or recognizes target install state,
 sends exactly one reboot request, observes TCP/22 stop, waits for TCP/22 to
-return, reads the authenticated CLI version, and requires the exact target.
+return, requires a 180-second post-SSH stabilization window, then polls the
+authenticated CLI for up to 600 seconds and requires the exact target.
 An HTTP connection close is accepted only when TCP/22 subsequently stops. ICMP
 ping is optional (`reboot_ping_check_enabled`) and disabled by default.
 
-Polling occurs every five seconds and proceeds immediately on success. The
-configured timeout is a maximum, not a fixed sleep. No second reboot is sent
-when a boot exceeds the timeout.
+Polling occurs every five seconds. The stabilization window is intentionally
+fixed because TCP/22 can open while appliance services are still booting. The
+playbook allows at least 1,200 seconds for SSH to return and never sends a
+second reboot when a boot exceeds the timeout.
 
 ## 12. Monitor installns and reboot
 
@@ -637,8 +640,9 @@ when subsequent state verification passes.
 
 A Secondary can reset TCP/22 while rebooting and the NITRO HTTP request can end
 with `Remote end closed connection without response`. That message alone is not
-a failed reboot. The current playbook verifies that TCP/22 stops, waits for it
-to return, and then polls authenticated CLI output. If the Secondary does not
+a failed reboot. The current playbook verifies that TCP/22 stops, waits up to
+1,200 seconds for it to return, waits another 180 seconds for boot stabilization,
+and then polls authenticated CLI output for up to 600 seconds. If the Secondary does not
 complete these checks, the original Primary is skipped and the next pair can
 continue. Reports are still written even if a pair returns no normal completion
 record.

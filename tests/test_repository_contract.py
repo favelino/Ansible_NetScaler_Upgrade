@@ -93,11 +93,22 @@ class RepositoryContractTests(unittest.TestCase):
         upgrade_secondary = playbook.index("Upgrade original Secondary")
         restore = playbook.index("Restore HA synchronization and command propagation")
         report = playbook.index("Build pair report record")
+        matching_versions = playbook.index("Require matching versions before HA reconciliation")
+        normalize = playbook.index("Normalize HA sync and propagation before isolation")
+        baseline_sync = playbook.index("Force a clean synchronization before isolation")
+        isolation_started = playbook.index("Mark HA isolation as started")
+        self.assertLess(matching_versions, normalize)
+        self.assertLess(normalize, baseline_sync)
+        self.assertLess(baseline_sync, isolation_started)
+        self.assertLess(isolation_started, disable)
         self.assertLess(disable, upgrade_secondary)
         self.assertLess(restore, report)
         self.assertNotIn("netscaler.adc.hanode:", playbook)
         self.assertNotIn("netscaler.adc.hasync:", playbook)
-        self.assertIn("Require healthy HA controls before isolation", playbook)
+        self.assertIn("Require healthy HA controls before isolation after reconciliation", playbook)
+        self.assertIn("Require matching versions before HA reconciliation", playbook)
+        self.assertIn("Normalize HA sync and propagation before isolation", playbook)
+        self.assertIn("Force a clean synchronization before isolation", playbook)
         self.assertIn(
             "ssh_netscaler_adc set ha node -hasync DISABLED -haprop DISABLED",
             playbook,
@@ -106,7 +117,7 @@ class RepositoryContractTests(unittest.TestCase):
             "ssh_netscaler_adc set ha node -hasync ENABLED -haprop ENABLED",
             playbook,
         )
-        self.assertEqual(playbook.count("ssh_netscaler_adc save ns config"), 2)
+        self.assertEqual(playbook.count("ssh_netscaler_adc save ns config"), 3)
         self.assertIn("running configuration has not changed", playbook)
         self.assertIn("Sync State", playbook)
         self.assertIn("Propagation", playbook)
@@ -127,7 +138,7 @@ class RepositoryContractTests(unittest.TestCase):
             playbook.count("ssh_netscaler_adc force ha failover -force"), 3
         )
         self.assertIn("Restore original roles when both upgraded nodes are inverted", playbook)
-        self.assertEqual(playbook.count("ssh_netscaler_adc force ha sync"), 1)
+        self.assertEqual(playbook.count("ssh_netscaler_adc force ha sync"), 2)
 
     def test_playbook_writes_reports_before_final_assertion(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
@@ -165,6 +176,14 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("reboot_ping_check_enabled", node_tasks)
         self.assertIn("failed_when: false", node_tasks)
         self.assertIn("No second reboot was sent", node_tasks)
+        self.assertIn("post_reboot_stabilization_seconds | default(180)", node_tasks)
+        self.assertIn("[reboot_up_timeout | int, 1200] | max", node_tasks)
+        self.assertIn("[post_reboot_cli_timeout | int, 600] | max", node_tasks)
+        ssh_return = node_tasks.index("Wait for {{ upgrade_role_label }} SSH to return")
+        stabilization = node_tasks.index("Allow {{ upgrade_role_label }} services to stabilize")
+        cli_version = node_tasks.index("Read final {{ upgrade_role_label }} version")
+        self.assertLess(ssh_return, stabilization)
+        self.assertLess(stabilization, cli_version)
         self.assertIn("create system backup", node_tasks)
         self.assertIn("-level full", node_tasks)
         self.assertIn("node_version_after_raw.unreachable", node_tasks)

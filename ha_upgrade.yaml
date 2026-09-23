@@ -182,7 +182,97 @@
               Live HA roles no longer match inventory.ini. Run upgrade_prep.yaml again
               before attempting this pair.
 
-        - name: "STEP 02/12 | {{ pair_name }} | Read local HA controls before isolation"
+        - name: "STEP 02/12 | {{ pair_name }} | Read both running versions before HA reconciliation"
+          ansible.builtin.raw: ssh_netscaler_adc show ns version
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: pre_isolation_versions
+          changed_when: false
+
+        - name: "STEP 02/12 | {{ pair_name }} | Parse both running versions before HA reconciliation"
+          ansible.builtin.set_fact:
+            pre_isolation_primary_version_matches: >-
+              {{ pre_isolation_versions.results[0].stdout | default('')
+                 | regex_findall('(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)') }}
+            pre_isolation_secondary_version_matches: >-
+              {{ pre_isolation_versions.results[1].stdout | default('')
+                 | regex_findall('(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)') }}
+
+        - name: "STEP 02/12 | {{ pair_name }} | Require matching versions before HA reconciliation"
+          ansible.builtin.assert:
+            that:
+              - pre_isolation_primary_version_matches | length > 0
+              - pre_isolation_secondary_version_matches | length > 0
+              - (pre_isolation_primary_version_matches[0][0] ~ '-' ~ pre_isolation_primary_version_matches[0][1]) == (pre_isolation_secondary_version_matches[0][0] ~ '-' ~ pre_isolation_secondary_version_matches[0][1])
+            fail_msg: >-
+              The pair entered Stage 2 with mixed or unreadable versions. HA controls
+              were not changed and no upgrade was started.
+
+        - name: "STEP 02/12 | {{ pair_name }} | Normalize HA sync and propagation before isolation"
+          ansible.builtin.raw: >-
+            ssh_netscaler_adc set ha node -hasync ENABLED -haprop ENABLED
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: ha_baseline_enable_commands
+          until:
+            - not (ha_baseline_enable_commands.unreachable | default(false))
+            - ha_baseline_enable_commands.rc | default(1) == 0
+          retries: >-
+            {{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
+          changed_when: true
+
+        - name: "STEP 02/12 | {{ pair_name }} | Save normalized HA controls"
+          ansible.builtin.raw: ssh_netscaler_adc save ns config
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: ha_baseline_save_commands
+          changed_when: >-
+            ha_baseline_save_commands.rc == 0
+            and 'running configuration has not changed' not in
+                (ha_baseline_save_commands.stdout | default('') | lower)
+          failed_when:
+            - ha_baseline_save_commands.rc != 0
+            - "'running configuration has not changed' not in (ha_baseline_save_commands.stdout | default('') | lower)"
+
+        - name: "STEP 02/12 | {{ pair_name }} | Wait for normalized HA controls before clean synchronization"
+          ansible.builtin.raw: ssh_netscaler_adc show ha node 0
+          delegate_to: "{{ item }}"
+          loop:
+            - "{{ primary_host }}"
+            - "{{ secondary_host }}"
+          loop_control:
+            label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
+          register: ha_baseline_controls_before_sync
+          until:
+            - not (ha_baseline_controls_before_sync.unreachable | default(false))
+            - ha_baseline_controls_before_sync.rc | default(1) == 0
+            - (ha_baseline_controls_before_sync.stdout | default('')) is search('(?im)^\s*Sync State\s*:\s*(ENABLED|SUCCESS)\s*$')
+            - (ha_baseline_controls_before_sync.stdout | default('')) is search('(?im)^\s*Propagation\s*:\s*ENABLED\s*$')
+          retries: >-
+            {{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
+          changed_when: false
+
+        - name: "STEP 02/12 | {{ pair_name }} | Force a clean synchronization before isolation"
+          ansible.builtin.raw: ssh_netscaler_adc force ha sync
+          delegate_to: "{{ primary_host }}"
+          register: ha_baseline_sync
+          changed_when: true
+
+        - name: "STEP 02/12 | {{ pair_name }} | Wait for healthy HA controls before isolation"
           ansible.builtin.raw: >-
             ssh_netscaler_adc show ha node 0
           delegate_to: "{{ item }}"
@@ -192,15 +282,23 @@
           loop_control:
             label: "{{ hostvars[item].netscaler_hostname | default(item) }} ({{ hostvars[item].nsip }})"
           register: initial_local_ha_controls
+          until:
+            - not (initial_local_ha_controls.unreachable | default(false))
+            - initial_local_ha_controls.rc | default(1) == 0
+            - (initial_local_ha_controls.stdout | default('')) is search('(?im)^\s*Sync State\s*:\s*(ENABLED|SUCCESS)\s*$')
+            - (initial_local_ha_controls.stdout | default('')) is search('(?im)^\s*Propagation\s*:\s*ENABLED\s*$')
+          retries: >-
+            {{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
+          delay: "{{ ha_poll_interval }}"
           changed_when: false
 
-        - name: "STEP 02/12 | {{ pair_name }} | Require healthy HA controls before isolation"
+        - name: "STEP 02/12 | {{ pair_name }} | Require healthy HA controls before isolation after reconciliation"
           ansible.builtin.assert:
             that:
               - (item.stdout | default('')) is search('(?im)^\\s*Sync State\\s*:\\s*(ENABLED|SUCCESS)\\s*$')
               - (item.stdout | default('')) is search('(?im)^\\s*Propagation\\s*:\\s*ENABLED\\s*$')
             fail_msg: >-
-              Local haSync or haProp is not healthy on
+              Local haSync or haProp could not be normalized on
               {{ hostvars[item.item].netscaler_hostname | default(item.item) }}
               ({{ hostvars[item.item].nsip }}). No disruptive action was taken.
           loop: "{{ initial_local_ha_controls.results }}"

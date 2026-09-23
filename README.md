@@ -107,8 +107,10 @@ minimum_var_free_gb: 5
 create_pre_upgrade_backup: true
 reboot_ping_check_enabled: false
 reboot_poll_interval: 5
-reboot_up_timeout: 600
-post_reboot_cli_timeout: 180
+reboot_down_timeout: 300
+reboot_up_timeout: 1200
+post_reboot_stabilization_seconds: 180
+post_reboot_cli_timeout: 600
 ha_poll_interval: 5
 ha_transition_timeout: 180
 
@@ -120,8 +122,10 @@ Use a trusted CA bundle and `netscaler_console_insecure: false` in production.
 `prep_devices_parallel` counts individual appliances. `ha_pairs_parallel`
 counts complete HA pairs.
 
-Timer values are maximums; polling completes immediately when the expected
-state appears. Keep `create_pre_upgrade_backup: true`. Do not enable
+The playbook enforces safety floors of 300 seconds to observe SSH stop, 1,200
+seconds for SSH to return, 180 seconds of continuous post-SSH stabilization,
+and 600 seconds for authenticated CLI validation. Higher configured values are
+honored. Keep `create_pre_upgrade_backup: true`. Do not enable
 `retry_failed_installns` globally; use a one-run `-e` override only after
 reviewing a failed installer log.
 
@@ -252,7 +256,11 @@ For each pair, Stage 2:
 
 HA controls are changed with documented NetScaler CLI commands through the
 collection's `netscaler.adc.ssh_netscaler_adc` connection plugin. Local node
-state is verified before isolation, after isolation, and after restoration. This
+state is verified before isolation, after isolation, and after restoration. If
+a previous interrupted run left only one node with disabled controls, Stage 2
+first requires matching versions and original healthy roles, enables both
+nodes, saves, forces a clean sync, and verifies the healthy baseline before
+isolating the pair again. This
 avoids a `netscaler.adc.hanode` 2.17.0 duplicate-primary-key read failure on
 two-node HA responses.
 
@@ -275,7 +283,9 @@ its log has been reviewed.
 
 An HTTP connection can close because the appliance has started rebooting. The
 playbook confirms reboot by observing TCP/22 stop, waits for TCP/22 and the CLI
-to return, and never sends a second automatic reboot. ICMP ping is optional and
+to return, requires TCP/22 to remain available through a 180-second
+stabilization window, and then polls the authenticated CLI for up to 600 more
+seconds. It never sends a second automatic reboot. ICMP ping is optional and
 disabled by default.
 
 ## Final validation and reports
