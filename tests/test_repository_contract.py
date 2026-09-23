@@ -152,16 +152,14 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("ssh_netscaler_adc nscli", node_tasks)
         self.assertNotIn("ssh_netscaler_adc test", node_tasks)
         self.assertNotIn("ssh_netscaler_adc sha256", node_tasks)
-        self.assertIn(
-            "test -f {{ prepared_firmware_remote_marker | quote }}", node_tasks
-        )
-        self.assertIn(
-            "cd {{ (prepared_firmware_remote_installns | dirname) | quote }}",
-            node_tasks,
-        )
+        self.assertIn("'if test -f ' ~ prepared_firmware_remote_marker", node_tasks)
+        self.assertIn("'sha256 -q ' ~ prepared_firmware_remote_archive", node_tasks)
+        self.assertIn("'if test -f ' ~ prepared_firmware_remote_installns", node_tasks)
+        self.assertIn("'cd ' ~ (prepared_firmware_remote_installns | dirname)", node_tasks)
+        self.assertGreaterEqual(node_tasks.count("| quote }}"), 11)
         self.assertIn("INSTALLNS_RC=$rc", node_tasks)
         self.assertNotIn("{{ ('cat ' ~ node_install_rc) | quote }}", node_tasks)
-        self.assertNotIn("{{ ('rm -f ' ~ node_install_log", node_tasks)
+        self.assertIn("{{ ('rm -f ' ~ node_install_log", node_tasks)
         self.assertIn("without remote Python", node_tasks)
         self.assertIn("Optional management ping", node_tasks)
         self.assertIn("reboot_ping_check_enabled", node_tasks)
