@@ -275,11 +275,18 @@ remain isolated as `MANUAL_RECOVERY_REQUIRED`. Equal-version nodes with
 inverted roles receive one conditional, verified failback.
 
 `installns` is launched as a persistent process and tracked with PID, log, and
-return-code files in `/var/tmp`. A safe retry recognizes a completed target
-installation in `/var/nsinstall/installns_state` and continues with the
-controlled reboot instead of reinstalling the image. A previous non-zero
-installer return code requires explicit `-e retry_failed_installns=true` after
-its log has been reviewed.
+return-code files in `/var/tmp`. A safe retry accepts a completed target
+installation only when the return code is zero, `installns_state` contains the
+target and an end time, the target kernel exists in `/flash`, and
+`/flash/boot/loader.conf` selects it. Stale state alone can never trigger a
+reboot. A previous non-zero installer return code requires explicit
+`-e retry_failed_installns=true` after its log has been reviewed.
+
+Before each reboot, the controller saves installer and boot-loader evidence in
+`reports/upgrade-<UTC-ID>-<inventory-host>-installns.txt`. After the appliance
+returns, it saves the observed running version and boot selection in a matching
+`-postboot.txt` file. If the target kernel or loader entry is missing, the node
+is not rebooted and its pair stops before the Primary is touched.
 
 An HTTP connection can close because the appliance has started rebooting. The
 playbook confirms reboot by observing TCP/22 stop, waits for TCP/22 and the CLI
@@ -294,6 +301,8 @@ Stage 2 writes:
 
 - `reports/upgrade-<UTC-ID>.json`
 - `reports/upgrade-<UTC-ID>.md`
+- `reports/upgrade-<UTC-ID>-<inventory-host>-installns.txt`
+- `reports/upgrade-<UTC-ID>-<inventory-host>-postboot.txt`
 
 The process returns a non-zero exit code after writing the reports if any pair
 fails. A pair is successful only when both nodes run the target version, the
