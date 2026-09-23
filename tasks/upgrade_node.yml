@@ -34,15 +34,16 @@
   block:
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Verify preparation marker"
       ansible.builtin.raw: >-
-        if test -f {{ prepared_firmware_remote_marker | quote }};
-        then echo PREP_MARKER_OK; else echo PREP_MARKER_MISSING; fi
+        {{ ('if test -f ' ~ prepared_firmware_remote_marker ~
+            '; then echo PREP_MARKER_OK; else echo PREP_MARKER_MISSING; fi') | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_preparation_marker
       changed_when: false
       failed_when: false
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Recheck prepared archive SHA-256"
-      ansible.builtin.raw: sha256 -q {{ prepared_firmware_remote_archive | quote }}
+      ansible.builtin.raw: >-
+        {{ ('sha256 -q ' ~ prepared_firmware_remote_archive) | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_prepared_archive
       changed_when: false
@@ -50,8 +51,8 @@
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Verify prepared installns"
       ansible.builtin.raw: >-
-        if test -f {{ prepared_firmware_remote_installns | quote }};
-        then echo INSTALLNS_FILE_OK; else echo INSTALLNS_FILE_MISSING; fi
+        {{ ('if test -f ' ~ prepared_firmware_remote_installns ~
+            '; then echo INSTALLNS_FILE_OK; else echo INSTALLNS_FILE_MISSING; fi') | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_prepared_installns
       changed_when: false
@@ -117,9 +118,9 @@
 
     - name: Inspect staged target version without remote Python
       ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -Fqx {{ ('VERSION ns-' ~ netscaler_target_version ~ '.gz') | quote }} /var/nsinstall/installns_state;
-        then echo INSTALL_STATE_VERSION_OK; else echo INSTALL_STATE_VERSION_MISSING; fi
+        {{ ("if test -f /var/nsinstall/installns_state" ~
+            " && grep -Fqx 'VERSION ns-" ~ netscaler_target_version ~ ".gz' /var/nsinstall/installns_state;" ~
+            " then echo INSTALL_STATE_VERSION_OK; else echo INSTALL_STATE_VERSION_MISSING; fi") | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_install_state_version
       changed_when: false
@@ -127,9 +128,9 @@
 
     - name: Inspect staged completion time without remote Python
       ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -q '^END_TIME ' /var/nsinstall/installns_state;
-        then echo INSTALL_STATE_END_OK; else echo INSTALL_STATE_END_MISSING; fi
+        {{ ("if test -f /var/nsinstall/installns_state" ~
+            " && grep -q '^END_TIME ' /var/nsinstall/installns_state;" ~
+            " then echo INSTALL_STATE_END_OK; else echo INSTALL_STATE_END_MISSING; fi") | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_install_state_end
       changed_when: false
@@ -137,9 +138,9 @@
 
     - name: Inspect persistent installns return code without remote Python
       ansible.builtin.raw: >-
-        if test -f {{ node_install_rc | quote }};
-        then rc=$(tr -d '[:space:]' < {{ node_install_rc | quote }}); echo INSTALLNS_RC=$rc;
-        else echo INSTALLNS_RC_MISSING; fi
+        {{ ("if test -f " ~ node_install_rc ~
+            "; then rc=$(tr -d '[:space:]' < " ~ node_install_rc ~
+            "); echo INSTALLNS_RC=$rc; else echo INSTALLNS_RC_MISSING; fi") | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_install_rc_existing
       changed_when: false
@@ -147,8 +148,8 @@
 
     - name: Inspect running installns process without remote Python
       ansible.builtin.raw: >-
-        if pgrep -f '[i]nstallns' >/dev/null 2>&1;
-        then echo INSTALLNS_RUNNING; else echo INSTALLNS_NOT_RUNNING; fi
+        {{ ("if pgrep -f '[i]nstallns' >/dev/null 2>&1;" ~
+            " then echo INSTALLNS_RUNNING; else echo INSTALLNS_NOT_RUNNING; fi") | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_install_process_existing
       changed_when: false
@@ -195,7 +196,7 @@
 
     - name: Remove stale installns tracking files
       ansible.builtin.raw: >-
-        rm -f {{ node_install_log | quote }} {{ node_install_rc | quote }} {{ node_install_pid | quote }}
+        {{ ('rm -f ' ~ node_install_log ~ ' ' ~ node_install_rc ~ ' ' ~ node_install_pid) | quote }}
       delegate_to: "{{ upgrade_target }}"
       when: >-
         node_install_resume_state == 'INSTALLNS_REQUIRED'
@@ -204,12 +205,11 @@
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Start installns without remote Python on {{ upgrade_role_label }}"
       ansible.builtin.raw: >-
-        cd {{ (prepared_firmware_remote_installns | dirname) | quote }}
-        && (nohup /bin/sh -c
-        {{ ('./installns -Y -n > ' ~ node_install_log ~
-            ' 2>&1; rc=$?; echo $rc > ' ~ node_install_rc) | quote }}
-        </dev/null >/dev/null 2>&1
-        & echo $! > {{ node_install_pid | quote }})
+        {{ ('cd ' ~ (prepared_firmware_remote_installns | dirname) ~
+            ' && (nohup /bin/sh -c ' ~
+            (('./installns -Y -n > ' ~ node_install_log ~
+              ' 2>&1; rc=$?; echo $rc > ' ~ node_install_rc) | quote) ~
+            ' </dev/null >/dev/null 2>&1 & echo $! > ' ~ node_install_pid ~ ')') | quote }}
       delegate_to: "{{ upgrade_target }}"
       when: >-
         node_install_resume_state == 'INSTALLNS_REQUIRED'
@@ -218,9 +218,9 @@
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Poll installns completion"
       ansible.builtin.raw: >-
-        if test -f {{ node_install_rc | quote }};
-        then rc=$(tr -d '[:space:]' < {{ node_install_rc | quote }}); echo INSTALLNS_RC=$rc;
-        else echo INSTALLNS_RC_PENDING; fi
+        {{ ("if test -f " ~ node_install_rc ~
+            "; then rc=$(tr -d '[:space:]' < " ~ node_install_rc ~
+            "); echo INSTALLNS_RC=$rc; else echo INSTALLNS_RC_PENDING; fi") | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_install_status
       changed_when: false
@@ -241,9 +241,9 @@
 
     - name: Validate staged target version without remote Python
       ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -Fqx {{ ('VERSION ns-' ~ netscaler_target_version ~ '.gz') | quote }} /var/nsinstall/installns_state;
-        then echo INSTALL_STATE_VERSION_OK; else echo INSTALL_STATE_VERSION_MISSING; fi
+        {{ ("if test -f /var/nsinstall/installns_state" ~
+            " && grep -Fqx 'VERSION ns-" ~ netscaler_target_version ~ ".gz' /var/nsinstall/installns_state;" ~
+            " then echo INSTALL_STATE_VERSION_OK; else echo INSTALL_STATE_VERSION_MISSING; fi") | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_install_state_version_after
       changed_when: false
@@ -251,9 +251,9 @@
 
     - name: Validate staged completion time without remote Python
       ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -q '^END_TIME ' /var/nsinstall/installns_state;
-        then echo INSTALL_STATE_END_OK; else echo INSTALL_STATE_END_MISSING; fi
+        {{ ("if test -f /var/nsinstall/installns_state" ~
+            " && grep -q '^END_TIME ' /var/nsinstall/installns_state;" ~
+            " then echo INSTALL_STATE_END_OK; else echo INSTALL_STATE_END_MISSING; fi") | quote }}
       delegate_to: "{{ upgrade_target }}"
       register: node_install_state_end_after
       changed_when: false
