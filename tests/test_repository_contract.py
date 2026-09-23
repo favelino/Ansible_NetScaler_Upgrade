@@ -158,6 +158,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("INSTALLNS_RC_PENDING", node_tasks)
         self.assertIn("INSTALLNS_FAILED", node_tasks)
         self.assertIn("retry_failed_installns", node_tasks)
+        self.assertNotIn("INSTALLNS_TRACKED", node_tasks)
         self.assertGreaterEqual(node_tasks.count("ansible.builtin.raw:"), 10)
         self.assertEqual(node_tasks.count("ssh_netscaler_adc show ns version"), 2)
         self.assertNotIn("ssh_netscaler_adc nscli", node_tasks)
@@ -192,6 +193,22 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("ansible.builtin.shell:", node_tasks)
         self.assertIn("Start installns without remote Python", node_tasks)
         self.assertIn("/var/nsinstall/installns_state", node_tasks)
+        self.assertIn("BOOT_LOADER_TARGET_OK", node_tasks)
+        self.assertIn("TARGET_KERNEL_OK", node_tasks)
+        self.assertIn("/flash/boot/loader.conf", node_tasks)
+        self.assertIn("Preserve installns evidence on the Ansible controller", node_tasks)
+        self.assertIn("Preserve post-reboot boot evidence on the Ansible controller", node_tasks)
+        staged_state = node_tasks.split("else 'INSTALLNS_STAGED'", 1)[1].split(
+            "else 'INSTALLNS_REQUIRED'", 1
+        )[0]
+        self.assertIn("node_existing_rc_matches", staged_state)
+        self.assertIn("BOOT_LOADER_TARGET_OK", staged_state)
+        self.assertIn("TARGET_KERNEL_OK", staged_state)
+        pre_reboot_gate = node_tasks.split("Confirm completed installns state", 1)[1].split(
+            "Request one reboot", 1
+        )[0]
+        self.assertIn("BOOT_LOADER_TARGET_OK", pre_reboot_gate)
+        self.assertIn("TARGET_KERNEL_OK", pre_reboot_gate)
         self.assertGreaterEqual(node_tasks.count("regex_findall"), 3)
         self.assertEqual(node_tasks.count("show ns version"), 2)
         version_pattern = r"(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)"
