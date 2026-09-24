@@ -160,15 +160,17 @@
       failed_when: false
 
     - name: Inspect target kernel and boot-loader selection without remote Python
+      vars:
+        boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
       ansible.builtin.raw: >-
-        {{ ("if grep -Fq 'kernel=\"/ns-" ~ netscaler_target_version ~
-            "' /flash/boot/loader.conf 2>/dev/null;" ~
+        {{ ("if grep -Fq " ~ (boot_kernel_needle | quote) ~
+            " /flash/boot/loader.conf 2>/dev/null;" ~
             " then echo BOOT_LOADER_TARGET_OK; else echo BOOT_LOADER_TARGET_MISSING; fi;" ~
             " if ls /flash/ns-" ~ netscaler_target_version ~
             "* >/dev/null 2>&1; then echo TARGET_KERNEL_OK; else echo TARGET_KERNEL_MISSING; fi;" ~
             " if test -f /flash/boot/loader.conf.local;" ~
-            " then if grep -Fq 'kernel=\"/ns-" ~ netscaler_target_version ~
-            "' /flash/boot/loader.conf.local;" ~
+            " then if grep -Fq " ~ (boot_kernel_needle | quote) ~
+            " /flash/boot/loader.conf.local;" ~
             " then echo LOCAL_BOOT_LOADER_TARGET_OK; else echo LOCAL_BOOT_LOADER_TARGET_MISSING; fi;" ~
             " else echo LOCAL_BOOT_LOADER_NOT_PRESENT; fi") | quote }}
       delegate_to: "{{ upgrade_target }}"
@@ -284,9 +286,11 @@
       failed_when: false
 
     - name: Validate target kernel and boot-loader selection before reboot
+      vars:
+        boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
       ansible.builtin.raw: >-
-        {{ ("if grep -Fq 'kernel=\"/ns-" ~ netscaler_target_version ~
-            "' /flash/boot/loader.conf 2>/dev/null;" ~
+        {{ ("if grep -Fq " ~ (boot_kernel_needle | quote) ~
+            " /flash/boot/loader.conf 2>/dev/null;" ~
             " then echo BOOT_LOADER_TARGET_OK; else echo BOOT_LOADER_TARGET_MISSING; fi;" ~
             " if ls /flash/ns-" ~ netscaler_target_version ~
             "* >/dev/null 2>&1; then echo TARGET_KERNEL_OK; else echo TARGET_KERNEL_MISSING; fi;" ~
@@ -454,10 +458,12 @@
     node_version_after: "{{ node_version_after_matches[0][0] ~ '-' ~ node_version_after_matches[0][1] }}"
 
 - name: Inspect boot-loader selection after reboot
+  vars:
+    boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
   ansible.builtin.raw: >-
     {{ ("echo RUNNING_VERSION=" ~ node_version_after ~
-        "; if grep -Fq 'kernel=\"/ns-" ~ netscaler_target_version ~
-        "' /flash/boot/loader.conf 2>/dev/null;" ~
+        "; if grep -Fq " ~ (boot_kernel_needle | quote) ~
+        " /flash/boot/loader.conf 2>/dev/null;" ~
         " then echo BOOT_LOADER_TARGET_OK; else echo BOOT_LOADER_TARGET_MISSING; fi;" ~
         " if ls /flash/ns-" ~ netscaler_target_version ~
         "* >/dev/null 2>&1; then echo TARGET_KERNEL_OK; else echo TARGET_KERNEL_MISSING; fi;" ~
