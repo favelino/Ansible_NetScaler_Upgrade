@@ -178,14 +178,16 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn("ssh_netscaler_adc nscli", node_tasks)
         self.assertNotIn("ssh_netscaler_adc test", node_tasks)
         self.assertNotIn("ssh_netscaler_adc sha256", node_tasks)
-        self.assertIn("'if test -f ' ~ prepared_firmware_remote_marker", node_tasks)
-        self.assertIn("'sha256 -q ' ~ prepared_firmware_remote_archive", node_tasks)
-        self.assertIn("'if test -f ' ~ prepared_firmware_remote_installns", node_tasks)
-        self.assertIn("'cd ' ~ (prepared_firmware_remote_installns | dirname)", node_tasks)
-        self.assertGreaterEqual(node_tasks.count("| quote }}"), 11)
+        self.assertIn("prepared_firmware_remote_marker | quote", node_tasks)
+        self.assertIn("prepared_firmware_remote_archive | quote", node_tasks)
+        self.assertIn("prepared_firmware_remote_installns | quote", node_tasks)
+        self.assertIn(
+            "(prepared_firmware_remote_installns | dirname) | quote", node_tasks
+        )
+        self.assertGreaterEqual(node_tasks.count("| quote"), 20)
         self.assertIn("INSTALLNS_RC=$rc", node_tasks)
         self.assertNotIn("{{ ('cat ' ~ node_install_rc) | quote }}", node_tasks)
-        self.assertIn("{{ ('rm -f ' ~ node_install_log", node_tasks)
+        self.assertIn("rm -f {{ node_install_log | quote }}", node_tasks)
         self.assertIn("without remote Python", node_tasks)
         self.assertIn("Optional management ping", node_tasks)
         self.assertIn("reboot_ping_check_enabled", node_tasks)
@@ -204,6 +206,11 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("node_version_after_raw.unreachable", node_tasks)
         self.assertIn("ignore_unreachable: true", node_tasks)
         self.assertIn("nohup /bin/sh", node_tasks)
+        self.assertIn("Confirm installns launcher created persistent tracking", node_tasks)
+        self.assertIn("INSTALLNS_TRACKING_OK", node_tasks)
+        self.assertIn("INSTALLNS_TRACKING_LOST", node_tasks)
+        self.assertNotIn("/var/tmp", node_tasks)
+        self.assertIn("/.ansible-installns-", node_tasks)
         self.assertNotIn("ansible.builtin.shell:", node_tasks)
         self.assertIn("Start installns without remote Python", node_tasks)
         self.assertIn("/var/nsinstall/installns_state", node_tasks)
@@ -302,6 +309,33 @@ class TemplateBackslashRegressionTests(unittest.TestCase):
             "upgrade_prep.yaml",
         ):
             offenders.extend(self._offenders(relative))
+        self.assertEqual(offenders, [])
+
+    def test_raw_shell_commands_are_not_wrapped_in_outer_quote_filter(self):
+        import yaml
+
+        tasks = yaml.safe_load(
+            (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
+        )
+        offenders = []
+
+        def walk(node, task=None):
+            if isinstance(node, dict):
+                task = node.get("name", task)
+                raw_value = node.get("ansible.builtin.raw")
+                if isinstance(raw_value, str):
+                    normalized = raw_value.strip()
+                    if normalized.startswith("{{") and re.search(
+                        r"[|]\s*quote\s*}}$", normalized, re.S
+                    ):
+                        offenders.append(task)
+                for value in node.values():
+                    walk(value, task)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value, task)
+
+        walk(tasks)
         self.assertEqual(offenders, [])
 
     def test_role_regex_variables_match_real_output(self):
