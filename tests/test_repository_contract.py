@@ -70,7 +70,7 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("Enforce successful preparation gate", playbook)
         self.assertIn("prepared_inventory_sha256", playbook)
         self.assertIn("prepared_target_version", playbook)
-        self.assertIn("prepared_firmware_remote_marker", node_tasks)
+        self.assertIn("prepared_firmware_remote_installns", node_tasks)
 
     def test_preparation_binds_filename_image_and_target_version(self):
         prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
@@ -179,8 +179,8 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("TARGET_STAGED_OK", node_tasks)
         self.assertGreaterEqual(node_tasks.count("ansible.builtin.raw:"), 5)
         self.assertEqual(node_tasks.count("ssh_netscaler_adc show ns version"), 2)
-        self.assertIn("prepared_firmware_remote_marker | quote", node_tasks)
-        self.assertIn("prepared_firmware_remote_installns | quote", node_tasks)
+        self.assertNotIn("PREPARED_INSTALLER_OK", node_tasks)
+        self.assertNotIn("PREPARED_INSTALLER_MISSING", node_tasks)
         self.assertIn(
             "(prepared_firmware_remote_installns | dirname) | quote", node_tasks
         )
