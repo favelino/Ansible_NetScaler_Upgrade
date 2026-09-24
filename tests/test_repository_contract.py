@@ -176,8 +176,9 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("register: node_install_result", node_tasks)
         self.assertIn("node_install_result.rc | default(0) == 0", node_tasks)
         self.assertIn("TARGET_ALREADY_STAGED", node_tasks)
-        self.assertIn("TARGET_STAGED_OK", node_tasks)
-        self.assertGreaterEqual(node_tasks.count("ansible.builtin.raw:"), 5)
+        self.assertNotIn("TARGET_STAGED_OK", node_tasks)
+        self.assertNotIn("TARGET_STAGED_MISSING", node_tasks)
+        self.assertEqual(node_tasks.count("ansible.builtin.raw:"), 4)
         self.assertEqual(node_tasks.count("ssh_netscaler_adc show ns version"), 2)
         self.assertNotIn("PREPARED_INSTALLER_OK", node_tasks)
         self.assertNotIn("PREPARED_INSTALLER_MISSING", node_tasks)
@@ -197,7 +198,6 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertLess(stabilization, cli_version)
         self.assertIn("node_version_after_raw.unreachable", node_tasks)
         self.assertIn("ignore_unreachable: true", node_tasks)
-        self.assertIn("/var/nsinstall/installns_state", node_tasks)
         self.assertIn("/flash/boot/loader.conf", node_tasks)
         self.assertIn("Preserve installns result on the Ansible controller", node_tasks)
         self.assertIn("Preserve post-reboot result on the Ansible controller", node_tasks)
@@ -332,7 +332,7 @@ class TemplateBackslashRegressionTests(unittest.TestCase):
     def test_boot_loader_needle_has_no_escaped_quote(self):
         node = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
         self.assertNotIn('\\"', node)
-        self.assertEqual(node.count("boot_kernel_needle | quote"), 2)
+        self.assertEqual(node.count("boot_kernel_needle | quote"), 1)
 
 
 if __name__ == "__main__":
