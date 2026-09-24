@@ -113,9 +113,9 @@
 
     - name: Record the extracted installns location
       ansible.builtin.set_fact:
-        prep_installns_relative: "{{ prep_installns_matches[0] | regex_replace('^\\./', '') }}"
+        prep_installns_relative: "{{ prep_installns_matches[0] | regex_replace('^[.]/', '') }}"
         prep_remote_installns: >-
-          {{ firmware_remote_directory | regex_replace('/$', '') }}/{{ prep_installns_matches[0] | regex_replace('^\\./', '') }}
+          {{ firmware_remote_directory | regex_replace('/$', '') }}/{{ prep_installns_matches[0] | regex_replace('^[.]/', '') }}
         prep_remote_marker: >-
           {{ firmware_remote_directory | regex_replace('/$', '') }}/.ansible_firmware_{{ prep_local_firmware.stat.checksum }}.ready
 
