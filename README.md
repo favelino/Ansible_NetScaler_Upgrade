@@ -274,9 +274,9 @@ inverted roles receive one conditional, verified failback.
 The official `./installns -Y -n` command runs directly and synchronously from
 the installer path recorded by Stage 1 through the
 NetScaler SSH connection. No background process or remote PID/RC/log tracking
-files are created. A retry recognizes a completed target installation in
-`/var/nsinstall/installns_state` and continues with the controlled reboot
-instead of reinstalling the image.
+files are created. A retry recognizes the target kernel selected in
+`/flash/boot/loader.conf` and continues with the controlled reboot instead of
+reinstalling the image.
 
 An HTTP connection can close because the appliance has started rebooting. The
 playbook confirms reboot by observing TCP/22 stop, waits for TCP/22 and the CLI
