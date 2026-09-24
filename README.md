@@ -104,7 +104,6 @@ prep_devices_parallel: 2
 ha_pairs_parallel: 2
 minimum_var_free_gb: 5
 
-create_pre_upgrade_backup: true
 reboot_ping_check_enabled: false
 reboot_poll_interval: 5
 reboot_down_timeout: 300
@@ -125,9 +124,7 @@ counts complete HA pairs.
 The playbook enforces safety floors of 300 seconds to observe SSH stop, 1,200
 seconds for SSH to return, 180 seconds of continuous post-SSH stabilization,
 and 600 seconds for authenticated CLI validation. Higher configured values are
-honored. Keep `create_pre_upgrade_backup: true`. Do not enable
-`retry_failed_installns` globally; use a one-run `-e` override only after
-reviewing a failed installer log.
+honored.
 
 `ansible.cfg` defaults to 50 forks. The forks value must be high enough for the
 selected concurrency.
@@ -274,12 +271,11 @@ roles are confirmed. Mixed versions, an unreachable node, or ambiguous roles
 remain isolated as `MANUAL_RECOVERY_REQUIRED`. Equal-version nodes with
 inverted roles receive one conditional, verified failback.
 
-`installns` is launched as a persistent process and tracked with PID, log, and
-return-code files inside the prepared `/var/nsinstall` directory. A safe retry recognizes a completed target
-installation in `/var/nsinstall/installns_state` and continues with the
-controlled reboot instead of reinstalling the image. A previous non-zero
-installer return code requires explicit `-e retry_failed_installns=true` after
-its log has been reviewed.
+The official `./installns -Y -n` command runs synchronously through the
+NetScaler SSH connection. No background process or remote PID/RC/log tracking
+files are created. A retry recognizes a completed target installation in
+`/var/nsinstall/installns_state` and continues with the controlled reboot
+instead of reinstalling the image.
 
 An HTTP connection can close because the appliance has started rebooting. The
 playbook confirms reboot by observing TCP/22 stop, waits for TCP/22 and the CLI
