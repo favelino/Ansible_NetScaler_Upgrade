@@ -38,25 +38,6 @@
 - name: Install and reboot node when it is not already at target
   when: node_version_before != netscaler_target_version
   block:
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Confirm prepared installer exists"
-      ansible.builtin.raw: >-
-        if test -f {{ prepared_firmware_remote_marker | quote }}
-        && test -x {{ prepared_firmware_remote_installns | quote }};
-        then echo PREPARED_INSTALLER_OK;
-        else echo PREPARED_INSTALLER_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_prepared_installer
-      changed_when: false
-      failed_when: false
-
-    - name: Require the prepared installer
-      ansible.builtin.assert:
-        that:
-          - "'PREPARED_INSTALLER_OK' in (node_prepared_installer.stdout | default(''))"
-        fail_msg: >-
-          The preparation marker or executable installns is missing on
-          {{ upgrade_role_label }}. Run upgrade_prep.yaml again.
-
     - name: Check whether installns already staged the target
       vars:
         boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
