@@ -253,13 +253,15 @@ For each pair, Stage 2:
 
 HA controls are changed with documented NetScaler CLI commands through the
 collection's `netscaler.adc.ssh_netscaler_adc` connection plugin. Local node
-state is verified before isolation, after isolation, and after restoration. If
-a previous interrupted run left only one node with disabled controls, Stage 2
-first requires matching versions and original healthy roles, enables both
-nodes, saves, forces a clean sync, and verifies the healthy baseline before
-isolating the pair again. This
-avoids a `netscaler.adc.hanode` 2.17.0 duplicate-primary-key read failure on
-two-node HA responses.
+state is verified before isolation, after isolation, and after restoration.
+Stage 2 does not force a synchronization before isolation: it first requires
+the original healthy roles and matching running versions, then directly
+isolates the pair. This prevents an unavailable Secondary from turning an
+otherwise safe pre-upgrade check into a fleet-wide failure. A final forced
+synchronization runs only after both nodes are upgraded, reachable, restored to
+their original roles, and HA controls are enabled. Local-node checks use
+`show ha node 0`, avoiding the `netscaler.adc.hanode` 2.17.0 duplicate-primary-
+key read failure on two-node HA responses.
 
 If the original Secondary fails installation, reboot, CLI validation, target
 version validation, or the local `UP` health gate, the original Primary is not
