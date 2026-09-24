@@ -126,6 +126,12 @@
   vars_files:
     - variables.yaml
     - "{{ lookup('ansible.builtin.first_found', {'files': ['prepared_firmware.yml', 'prepared_firmware.yml.example'], 'paths': [playbook_dir]}) }}"
+  vars:
+    # Keep regexes as plain YAML values. Backslashes inside Jinja string
+    # literals used by set_fact can be escaped again by Ansible.
+    ha_role_primary_regex: '(?im)^\s*Master State\s*:\s*Primary\s*$'
+    ha_role_secondary_regex: '(?im)^\s*Master State\s*:\s*Secondary\s*$'
+    ha_node_up_regex: '(?im)^\s*Node State\s*:\s*UP\s*$'
   pre_tasks:
     - name: Initialize pair progress and report data
       ansible.builtin.set_fact:
@@ -174,10 +180,10 @@
         - name: "STEP 02/12 | {{ pair_name }} | Reject stale HA role data"
           ansible.builtin.assert:
             that:
-              - initial_primary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Primary')
-              - initial_secondary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Secondary')
-              - initial_primary_ha.stdout is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
-              - initial_secondary_ha.stdout is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+              - initial_primary_ha.stdout is search(ha_role_primary_regex)
+              - initial_secondary_ha.stdout is search(ha_role_secondary_regex)
+              - initial_primary_ha.stdout is search(ha_node_up_regex)
+              - initial_secondary_ha.stdout is search(ha_node_up_regex)
             fail_msg: >-
               Live HA roles no longer match inventory.ini. Run upgrade_prep.yaml again
               before attempting this pair.
@@ -390,13 +396,13 @@
         - name: "STEP 06/12 | {{ pair_name }} | Require both nodes UP before failover"
           ansible.builtin.assert:
             that:
-              - (item.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+              - (item.stdout | default('')) is search(ha_node_up_regex)
               - >-
                 (item.item == primary_host and
-                 (item.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$'))
+                 (item.stdout | default('')) is search(ha_role_primary_regex))
                 or
                 (item.item == secondary_host and
-                 (item.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$'))
+                 (item.stdout | default('')) is search(ha_role_secondary_regex))
             fail_msg: >-
               {{ hostvars[item.item].netscaler_hostname | default(item.item) }} is not
               locally UP in its expected pre-failover role. The original Primary
@@ -417,8 +423,8 @@
           register: failover_secondary_ha
           until:
             - failover_secondary_ha.rc | default(1) == 0
-            - (failover_secondary_ha.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
-            - (failover_secondary_ha.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+            - (failover_secondary_ha.stdout | default('')) is search(ha_role_primary_regex)
+            - (failover_secondary_ha.stdout | default('')) is search(ha_node_up_regex)
           retries: "{{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}"
           delay: "{{ ha_poll_interval }}"
           changed_when: false
@@ -430,8 +436,8 @@
           register: failover_primary_ha
           until:
             - failover_primary_ha.rc | default(1) == 0
-            - (failover_primary_ha.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$')
-            - (failover_primary_ha.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+            - (failover_primary_ha.stdout | default('')) is search(ha_role_secondary_regex)
+            - (failover_primary_ha.stdout | default('')) is search(ha_node_up_regex)
           retries: "{{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}"
           delay: "{{ ha_poll_interval }}"
           changed_when: false
@@ -439,8 +445,8 @@
         - name: "STEP 06/12 | {{ pair_name }} | Verify failover before upgrading original Primary"
           ansible.builtin.assert:
             that:
-              - failover_secondary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Primary')
-              - failover_primary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Secondary')
+              - failover_secondary_ha.stdout is search(ha_role_primary_regex)
+              - failover_primary_ha.stdout is search(ha_role_secondary_regex)
             fail_msg: >-
               Failover did not leave the original Secondary as Primary and the
               original Primary as Secondary. Stop this pair and inspect HA state.
@@ -465,13 +471,13 @@
         - name: "STEP 10/12 | {{ pair_name }} | Require both nodes UP in inverted roles"
           ansible.builtin.assert:
             that:
-              - (item.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+              - (item.stdout | default('')) is search(ha_node_up_regex)
               - >-
                 (item.item == primary_host and
-                 (item.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$'))
+                 (item.stdout | default('')) is search(ha_role_secondary_regex))
                 or
                 (item.item == secondary_host and
-                 (item.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$'))
+                 (item.stdout | default('')) is search(ha_role_primary_regex))
             fail_msg: >-
               {{ hostvars[item.item].netscaler_hostname | default(item.item) }} is not
               locally UP in its expected pre-failback role. No blind failover was sent.
@@ -491,8 +497,8 @@
           register: final_primary_ha
           until:
             - final_primary_ha.rc | default(1) == 0
-            - (final_primary_ha.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
-            - (final_primary_ha.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+            - (final_primary_ha.stdout | default('')) is search(ha_role_primary_regex)
+            - (final_primary_ha.stdout | default('')) is search(ha_node_up_regex)
           retries: "{{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}"
           delay: "{{ ha_poll_interval }}"
           changed_when: false
@@ -504,8 +510,8 @@
           register: final_secondary_ha
           until:
             - final_secondary_ha.rc | default(1) == 0
-            - (final_secondary_ha.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$')
-            - (final_secondary_ha.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+            - (final_secondary_ha.stdout | default('')) is search(ha_role_secondary_regex)
+            - (final_secondary_ha.stdout | default('')) is search(ha_node_up_regex)
           retries: "{{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}"
           delay: "{{ ha_poll_interval }}"
           changed_when: false
@@ -515,8 +521,8 @@
             that:
               - pair_versions.primary.after == netscaler_target_version
               - pair_versions.secondary.after == netscaler_target_version
-              - final_primary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Primary')
-              - final_secondary_ha.stdout is search('(?im)^\\s*Master State\\s*:\\s*Secondary')
+              - final_primary_ha.stdout is search(ha_role_primary_regex)
+              - final_secondary_ha.stdout is search(ha_role_secondary_regex)
             fail_msg: "Final validation failed. Versions or original HA roles do not match the requested end state."
             success_msg: >-
               {{ pair_name }} completed correctly: both nodes are {{ netscaler_target_version }}
@@ -633,11 +639,11 @@
         - name: Classify current recovery roles
           ansible.builtin.set_fact:
             recovery_roles_original: >-
-              {{ (recovery_primary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
-                 and (recovery_secondary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$') }}
+              {{ (recovery_primary_role.stdout | default('')) is search(ha_role_primary_regex)
+                 and (recovery_secondary_role.stdout | default('')) is search(ha_role_secondary_regex) }}
             recovery_roles_inverted: >-
-              {{ (recovery_primary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$')
-                 and (recovery_secondary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$') }}
+              {{ (recovery_primary_role.stdout | default('')) is search(ha_role_secondary_regex)
+                 and (recovery_secondary_role.stdout | default('')) is search(ha_role_primary_regex) }}
           when: ha_versions_match | default(false) | bool
 
         - name: Restore original roles when both upgraded nodes are inverted
@@ -657,8 +663,8 @@
           register: recovery_final_primary_role
           until:
             - recovery_final_primary_role.rc | default(1) == 0
-            - (recovery_final_primary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
-            - (recovery_final_primary_role.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+            - (recovery_final_primary_role.stdout | default('')) is search(ha_role_primary_regex)
+            - (recovery_final_primary_role.stdout | default('')) is search(ha_node_up_regex)
           retries: >-
             {{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
           delay: "{{ ha_poll_interval }}"
@@ -676,8 +682,8 @@
           register: recovery_final_secondary_role
           until:
             - recovery_final_secondary_role.rc | default(1) == 0
-            - (recovery_final_secondary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$')
-            - (recovery_final_secondary_role.stdout | default('')) is search('(?im)^\\s*Node State\\s*:\\s*UP\\s*$')
+            - (recovery_final_secondary_role.stdout | default('')) is search(ha_role_secondary_regex)
+            - (recovery_final_secondary_role.stdout | default('')) is search(ha_node_up_regex)
           retries: >-
             {{ ((ha_transition_timeout | int) / (ha_poll_interval | int)) | round(0, 'ceil') | int }}
           delay: "{{ ha_poll_interval }}"
@@ -693,8 +699,8 @@
           ansible.builtin.set_fact:
             ha_restore_safe: >-
               {{ ha_versions_match | default(false) | bool
-                 and (recovery_final_primary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Primary\\s*$')
-                 and (recovery_final_secondary_role.stdout | default('')) is search('(?im)^\\s*Master State\\s*:\\s*Secondary\\s*$') }}
+                 and (recovery_final_primary_role.stdout | default('')) is search(ha_role_primary_regex)
+                 and (recovery_final_secondary_role.stdout | default('')) is search(ha_role_secondary_regex) }}
           when: ha_controls_change_started | default(false) | bool
 
         - name: Keep matching-version nodes isolated when original roles are not confirmed
