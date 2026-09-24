@@ -89,6 +89,16 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_playbook_isolates_and_restores_ha_controls(self):
         playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
+        initialization_play, upgrade_play = playbook.split(
+            "- name: Upgrade NetScaler HA pairs", 1
+        )
+        for regex_var in (
+            "ha_role_primary_regex",
+            "ha_role_secondary_regex",
+            "ha_node_up_regex",
+        ):
+            self.assertNotIn(regex_var, initialization_play)
+            self.assertIn(regex_var, upgrade_play)
         disable = playbook.index("Disable HA sync and propagation")
         upgrade_secondary = playbook.index("Upgrade original Secondary")
         restore = playbook.index("Restore HA synchronization and command propagation")
@@ -251,6 +261,73 @@ class RepositoryContractTests(unittest.TestCase):
         upgrade_primary = playbook.index("Upgrade original Primary")
         self.assertLess(upgrade_secondary, require_health)
         self.assertLess(require_health, upgrade_primary)
+
+
+class TemplateBackslashRegressionTests(unittest.TestCase):
+    """Reject backslashes in Jinja literals used by templated task values."""
+
+    CONDITIONAL_KEYS = {"when", "that", "until", "failed_when", "changed_when"}
+
+    def _offenders(self, relative):
+        import yaml
+
+        offenders = []
+
+        def walk(node, key=None, task=None):
+            if isinstance(node, dict):
+                if "name" in node and any(k.startswith("ansible.") for k in node):
+                    task = node["name"]
+                for child_key, value in node.items():
+                    inherited_key = key if key in self.CONDITIONAL_KEYS else child_key
+                    walk(value, inherited_key, task)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value, key, task)
+            elif (
+                isinstance(node, str)
+                and "{{" in node
+                and "\\" in node
+                and key not in self.CONDITIONAL_KEYS
+            ):
+                offenders.append(f"{relative}: {task} ({key})")
+
+        walk(yaml.safe_load((ROOT / relative).read_text(encoding="utf-8")))
+        return offenders
+
+    def test_no_backslashes_in_templated_non_conditional_values(self):
+        offenders = []
+        for relative in (
+            "ha_upgrade.yaml",
+            "tasks/upgrade_node.yml",
+            "upgrade_prep.yaml",
+        ):
+            offenders.extend(self._offenders(relative))
+        self.assertEqual(offenders, [])
+
+    def test_role_regex_variables_match_real_output(self):
+        playbook = (ROOT / "ha_upgrade.yaml").read_text(encoding="utf-8")
+        primary = re.search(
+            r"^\s*ha_role_primary_regex: '(.+)'$", playbook, re.M
+        ).group(1)
+        secondary = re.search(
+            r"^\s*ha_role_secondary_regex: '(.+)'$", playbook, re.M
+        ).group(1)
+        fixtures = ROOT / "tests" / "fixtures"
+        primary_out = (fixtures / "show_ha_node_0_primary.txt").read_text(
+            encoding="utf-8"
+        )
+        secondary_out = (fixtures / "show_ha_node_0_secondary.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertRegex(primary_out, primary)
+        self.assertNotRegex(primary_out, secondary)
+        self.assertRegex(secondary_out, secondary)
+        self.assertNotRegex(secondary_out, primary)
+
+    def test_boot_loader_needle_has_no_escaped_quote(self):
+        node = (ROOT / "tasks" / "upgrade_node.yml").read_text(encoding="utf-8")
+        self.assertNotIn('\\"', node)
+        self.assertGreaterEqual(node.count("boot_kernel_needle | quote"), 4)
 
 
 if __name__ == "__main__":
