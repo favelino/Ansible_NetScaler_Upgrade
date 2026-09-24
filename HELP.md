@@ -591,8 +591,9 @@ must be `ENABLED` on the Primary and normally `SUCCESS` on the Secondary.
 
 ### installns command fails
 
-The playbook runs `./installns -Y -n` directly from the prepared firmware
-directory. Its stdout, stderr, and return code are captured by the Ansible task.
+The playbook runs `./installns -Y -n` directly from the Stage 1 installer
+directory without a separate marker/permission gate. Its stdout, stderr, and
+return code are captured by the Ansible task.
 If it fails, no reboot is requested and the original Primary is not upgraded.
 
 Update and perform a syntax check before retrying:
