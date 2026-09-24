@@ -271,7 +271,8 @@ roles are confirmed. Mixed versions, an unreachable node, or ambiguous roles
 remain isolated as `MANUAL_RECOVERY_REQUIRED`. Equal-version nodes with
 inverted roles receive one conditional, verified failback.
 
-The official `./installns -Y -n` command runs synchronously through the
+The official `./installns -Y -n` command runs directly and synchronously from
+the installer path recorded by Stage 1 through the
 NetScaler SSH connection. No background process or remote PID/RC/log tracking
 files are created. A retry recognizes a completed target installation in
 `/var/nsinstall/installns_state` and continues with the controlled reboot
