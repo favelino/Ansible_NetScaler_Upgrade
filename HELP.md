@@ -1,211 +1,154 @@
-# NetScaler Fleet Upgrade Runbook
+# NetScaler HA fleet upgrade runbook
 
-## 1. Controller prerequisites
+This is the operator runbook for the current repository version. Read
+[README.md](README.md), this file, [TROUBLESHOOTING.md](TROUBLESHOOTING.md),
+and [DISCLAIMER.md](DISCLAIMER.md) before a change.
 
-- Run from the repository root.
-- Install Ansible and the `netscaler.adc` collection described in `README.md`.
-- Install `sshpass` when the NetScalers use password-based SSH.
-- Ensure the controller can reach NetScaler Console and every NSIP on TCP/22 and
-  the configured NITRO management protocol.
-- Confirm `ansible.cfg` provides enough forks for the selected concurrency.
-- Test the workflow against a non-production HA pair before a fleet rollout.
+## 1. Scope and operator responsibility
 
-## 2. Configure secure credentials
+This workflow supports normal two-node NetScaler HA pairs discovered through
+NetScaler Console. It does not support standalone appliances, clusters, or an
+invented one-node pair.
 
-Create `group_vars/all/vault.yml` with `ansible-vault create`. Define:
+The current playbooks do not create:
 
-```yaml
-vault_nitro_user: nsroot
-vault_nitro_pass: "NetScaler-password"
-vault_console_user: automation-api
-vault_console_pass: "Console-password"
-```
+- NetScaler system backups.
+- Configuration exports.
+- Hypervisor snapshots.
+- Application rollback points.
 
-Console credentials can alternatively come from `NETSCALER_CONSOLE_USER` and
-`NETSCALER_CONSOLE_PASS`. Do not put passwords in inventory, variables, command
-history, or a committed Vault password file.
+The command save ns config appears in Stage 2 only to persist changes to haSync
+and haProp. It is not a backup operation.
 
-## 3. Select the firmware
+Before running the automation, the operator must decide whether organizational
+policy requires an appliance backup, configuration export, VM snapshot, or
+other rollback artifact and create it outside this project. The operator also
+owns maintenance-window approval, application validation, rollback decisions,
+and vendor compatibility checks.
 
-Remove old archives from `new_firmware/` and place exactly one target `.tgz` or
-`.tar.gz` file there. Configure `netscaler_target_version` in `variables.yaml`.
+## 2. Record the execution baseline
 
-Preparation lists the archive with `tar -tzf`, requires exactly one `installns`
-entry, requires its filename and internal `ns-<version>.gz` image to match
-`netscaler_target_version`, uploads it to `/var/nsinstall/`, compares SHA-256 checksums, extracts it
-with `tar -xzf`, and verifies the resulting installer path. This supports archives
-where `installns` is at the root or inside a build subdirectory.
-
-The preparation and upgrade appliance commands are Python-free. NetScaler 13.1
-does not need to execute `ansible.builtin.ping`, `copy`, `stat`, `file`, or
-`shell` modules. The controller uses `sshpass` with `scp -O` for the firmware
-transfer; disk checks, checksums, extraction, markers, and `installns` execution
-use raw SSH. Do not install or modify Python packages on a NetScaler appliance.
-
-## 4. Run Stage 1 — preparation
-
-```bash
-ansible-playbook upgrade_prep.yaml \
-  --ask-vault-pass \
-  -e netscaler_console_url=https://your-console.example.com
-```
-
-Optional concurrency override:
-
-```bash
--e prep_devices_parallel=25
-```
-
-Expected outputs:
-
-- `inventory.ini`: all discovered reciprocal HA pairs.
-- `reports/prep-<UTC-ID>.json`: structured fleet preparation result.
-- `reports/prep-<UTC-ID>.md`: readable preparation report.
-- `prepared_firmware.yml`: Stage 2 safety gate and checksums.
-
-Standalone/non-HA Console entries are listed as skipped and do not abort
-discovery. A device claiming HA with a missing or nonreciprocal peer still
-aborts inventory generation.
-
-The summary explicitly separates:
-
-- `UNREACHABLE`: TCP/22 or authenticated Ansible connection failed.
-- `INSUFFICIENT_SPACE`: `/var` has less than 5 GB free.
-- `FAILED`: upload, SHA-256, extraction, or installer validation failed.
-- `PREPARED`: upload and extraction were verified successfully.
-
-Do not proceed while Stage 1 returns a non-zero exit code. Correct the listed
-devices and rerun the entire preparation stage. The generated inventory is safely
-replaced by the preparation playbook.
-
-## 5. Review the preparation gate
-
-Confirm the report shows every device as `PREPARED`. Verify that the device count
-is twice the HA-pair count and that the selected firmware SHA-256 is consistent.
-Do not manually edit `inventory.ini` or `prepared_firmware.yml`; Stage 2 verifies
-the saved inventory checksum and rejects modifications.
-
-## 6. Run Stage 2 — upgrade
-
-Start conservatively, for example two HA pairs at a time:
-
-```bash
-ansible-playbook upgrade_perform.yaml \
-  -i inventory.ini \
-  --ask-vault-pass \
-  -e ha_pairs_parallel=2
-```
-
-Increase only after observing a successful batch. The serial limit applies to
-whole HA pairs. The two nodes of a pair are never upgraded simultaneously.
-
-## 7. Monitor progress
-
-The console displays fleet preflight counts and pair-specific steps. A pair is
-blocked if either NSIP becomes unreachable or if the live roles no longer match
-the inventory created during preparation. Other healthy pairs continue.
-
-During `installns`, the controller keeps the raw SSH task open and waits for the
-official `./installns -Y -n` command to finish. No Ansible async directory,
-background process, PID file, RC file, or remote log file is used.
-
-The ordered sequence for each pair is:
-
-```text
-validate roles
--> normalize, save, and synchronize haSync/haProp when a prior run left partial isolation
--> disable and save haSync/haProp on both nodes
--> full backup, original Secondary upgrade and one reboot request
--> require target version and both local nodes UP
--> failover
--> full backup, original Primary upgrade and one reboot request
--> verified failback
--> final version and role validation
--> enable and save haSync/haProp on both nodes
--> force final synchronization from the restored original Primary
-```
-
-The HA settings are changed with the documented NetScaler CLI commands sent
-through the collection's `netscaler.adc.ssh_netscaler_adc` connection plugin.
-They are not BSD shell commands. This avoids a `netscaler.adc.hanode` 2.17.0
-read defect where the NITRO endpoint can return both HA nodes for `id=0` and
-the module stops with a duplicate-primary-key error before changing anything.
-The playbook always reads local node 0; it never accepts a two-node response as
-proof of a local role. If the original Secondary fails installation, boot, CLI
-validation, target-version validation, or the local `UP` gate, the original
-Primary is not upgraded and processing advances to the next scheduled pair.
-
-The recovery section reads both live versions. It re-enables HA controls only
-when the versions are known and equal and the original roles are confirmed.
-Mixed versions, an unreachable node, or ambiguous roles remain isolated and
-are marked `MANUAL_RECOVERY_REQUIRED`. If equal-version nodes are inverted,
-one conditional failback is issued and polled. A forced synchronization runs
-only after both nodes reach the target and the original roles are restored.
-
-## 8. Confirm completion
-
-Review both files under `reports/upgrade-<UTC-ID>.*`. A pair is successful only if:
-
-- Both NetScalers report `netscaler_target_version`.
-- The original Primary is Primary again.
-- The original Secondary is Secondary again.
-- `haSync` and `haProp` were re-enabled and saved on both nodes.
-- The final forced HA synchronization completed.
-- All commands in the ordered workflow completed.
-
-The final assertion produces a non-zero process exit status when any pair fails,
-but only after the reports are safely written.
-
-## 9. Retry rules
-
-- Never launch Stage 2 after a failed or partial Stage 1.
-- Rerun Stage 1 after changing firmware, inventory, Console topology, or HA roles.
-- Review a failed pair before retrying; do not blindly increase concurrency.
-- If the report says HA control restoration failed, manually verify and restore
-  `haSync ENABLED` and `haProp ENABLED` on both nodes before retrying.
-- A retry checks the selected loader kernel and target image in `/flash`. When
-  both match the target, the playbook does not run `installns` again; it resumes
-  with the controlled reboot and post-boot validation.
-- If the state is incomplete, review the failed Ansible task and the controller
-  report before retrying.
-- Keep the reports for audit and change-control evidence.
-
-
-## 10. Complete command sequence
-
-Run this sequence from the repository root for a normal change.
-
-### 10.1 Record the code and tool versions
+Run from the repository root:
 
 ~~~bash
+cd /path/to/Ansible_NetScaler_Upgrade
+
 git status --short
 git pull --ff-only
 git rev-parse HEAD
+
 ansible --version
 ansible-galaxy collection list netscaler.adc
+command -v sshpass
 ~~~
 
 Required baseline:
 
 - Ansible Core 2.16 or newer.
-- netscaler.adc collection 2.17.0 or newer.
-- sshpass installed when SCP uses password authentication.
-- No unexplained local Git changes.
+- netscaler.adc 2.17.0 or newer.
+- sshpass available.
+- No unresolved Git conflict.
+- Controller routing to Console and every NSIP.
 
-Install or update the collection with the same Linux user that runs Ansible:
+If git status displays local modifications, review them before pulling. Do not
+discard local credentials or configuration blindly.
+
+## 3. Install controller dependencies
+
+Ubuntu example:
 
 ~~~bash
+sudo apt update
+sudo apt install -y git python3-venv python3-pip sshpass
+
 ansible-galaxy collection install 'netscaler.adc:>=2.17.0' --force
 ansible-galaxy collection list netscaler.adc
 ~~~
 
-### 10.2 Verify configuration and firmware
+A virtual environment is optional when the system Ansible version satisfies the
+requirement. Always install and run the collection with the same Linux account
+that runs the playbooks.
+
+## 4. Create and validate Ansible Vault
+
+~~~bash
+mkdir -p group_vars/all
+ansible-vault create group_vars/all/vault.yml
+~~~
+
+Enter:
+
+~~~yaml
+---
+vault_nitro_user: nsroot
+vault_nitro_pass: "NetScaler-password"
+vault_console_user: automation-api
+vault_console_pass: "Console-password"
+~~~
+
+Validate and edit:
+
+~~~bash
+ansible-vault view group_vars/all/vault.yml
+ansible-vault edit group_vars/all/vault.yml
+~~~
+
+Do not place credentials in inventory.ini, variables.yaml, an -e argument, or a
+committed Vault-password file.
+
+## 5. Configure target, Console, and concurrency
 
 ~~~bash
 grep -E \
-  '^(netscaler_target_version|netscaler_console_url|netscaler_console_insecure|prep_devices_parallel|ha_pairs_parallel|minimum_var_free_gb):' \
+  '^(netscaler_target_version|netscaler_console_url|netscaler_console_ca_bundle|netscaler_console_insecure|minimum_var_free_gb|prep_devices_parallel|ha_pairs_parallel|firmware_local_directory|firmware_remote_directory):' \
   variables.yaml
+~~~
 
+Production-oriented example:
+
+~~~yaml
+netscaler_target_version: "14.1-73.33"
+netscaler_console_url: "https://console.example.com"
+netscaler_console_ca_bundle: "/path/to/console-ca.pem"
+netscaler_console_insecure: false
+
+firmware_local_directory: "new_firmware"
+firmware_remote_directory: "/var/nsinstall"
+minimum_var_free_gb: 5
+prep_devices_parallel: 20
+ha_pairs_parallel: 2
+~~~
+
+Concurrency meanings:
+
+- prep_devices_parallel prepares individual appliances.
+- ha_pairs_parallel schedules complete pair workflows.
+- A pair's Secondary and Primary are upgraded sequentially.
+- ansible.cfg has forks = 50; ensure it is sufficient for selected concurrency.
+
+Current reboot safety floors are enforced by the node task:
+
+- Up to 300 seconds to observe TCP/22 stop.
+- Up to 1,200 seconds for TCP/22 to return.
+- 180 seconds of post-SSH stabilization by default.
+- At least 600 seconds for authenticated CLI/version polling.
+
+The playbook sends only one reboot request. It does not automatically issue a
+second reboot after a timeout.
+
+## 6. Review security defaults
+
+The repository currently disables SSH host-key checking, bypasses known_hosts
+for SCP, and defaults NITRO certificate validation to false. These settings are
+convenient for a lab but are not a production security baseline. Before
+production use, evaluate pinned SSH keys, CA validation, restricted
+credentials, and a dedicated automation account.
+
+## 7. Select and validate firmware
+
+Keep exactly one archive in new_firmware:
+
+~~~bash
 ls -lh new_firmware/
 
 find new_firmware -maxdepth 1 -type f \
@@ -213,152 +156,101 @@ find new_firmware -maxdepth 1 -type f \
 
 sha256sum new_firmware/*
 tar -tzf new_firmware/*.tgz | grep -E '(^|/)installns$'
+tar -tzf new_firmware/*.tgz | grep -E '(^|/)ns-[0-9].*[.]gz$'
 ~~~
 
-There must be one archive and one installns entry. The archive target must agree
-with netscaler_target_version.
+Stage 1 requires exactly one archive and installns entry, a filename matching
+build-<target>_*.tgz, and an internal ns-<target>.gz image.
 
-Lab configuration example:
-
-~~~yaml
-netscaler_target_version: "14.1-73.33"
-netscaler_console_url: "https://10.100.71.200"
-netscaler_console_insecure: true
-minimum_var_free_gb: 5
-prep_devices_parallel: 2
-ha_pairs_parallel: 2
-~~~
-
-Use trusted certificates and insecure false in production.
-
-The repository defaults (`host_key_checking=False`, SCP
-`StrictHostKeyChecking=no`, and `netscaler_validate_certs: false`) are suitable
-for this lab only. Before production, pin appliance SSH host keys, remove the
-SCP bypass options, set `host_key_checking=True`, and validate Console/NITRO TLS
-with your CA bundle. Do not reuse the lab `nsroot` password in production.
-
-### 10.3 Validate Vault and SSH
+## 8. Validate the repository
 
 ~~~bash
-ansible-vault view group_vars/all/vault.yml
-~~~
-
-After inventory.ini exists, test a node:
-
-~~~bash
-ansible -i inventory.ini \
-  ns_10_100_48_1 \
-  -m ansible.builtin.raw \
-  -a 'echo CONNECTION_OK' \
-  --ask-vault-pass
-~~~
-
-Test the exact Python-free disk command:
-
-~~~bash
-ansible -i inventory.ini \
-  ns_10_100_48_1 \
-  -m ansible.builtin.raw \
-  -a "'df -Pk /var'" \
-  --ask-vault-pass
-~~~
-
-The Avail column must be at least 5 GiB. For example, 9760438 KiB is
-approximately 9.31 GiB.
-
-### 10.4 Syntax checks
-
-~~~bash
+python3 -m unittest -v
 ansible-playbook upgrade_prep.yaml --syntax-check
-
 ansible-playbook upgrade_perform.yaml \
   -i inventory.ini.example \
   --syntax-check
 ~~~
 
-The Stage 1 syntax check can warn that no inventory was parsed and that
-netscaler_nodes could not be matched. This is expected because syntax checking
-does not execute the Console discovery play. YAML errors and missing module
-errors are not expected.
+The Stage 1 syntax check may warn that no inventory or netscaler_nodes group was
+parsed because Console discovery has not executed. YAML errors, missing
+collections, and module errors are not expected.
 
-### 10.5 Run preparation
+## 9. Run Stage 1 preparation
 
 ~~~bash
 ansible-playbook upgrade_prep.yaml \
   --ask-vault-pass \
-  -e prep_devices_parallel=2
+  -e prep_devices_parallel=20
 ~~~
 
-Preparation sequence:
+Stage 1 generates inventory from Console; do not pass a manually maintained
+inventory to this command.
 
 | Step | Operation | Disruptive |
 |---|---|---|
-| Inventory | Query Console and validate reciprocal HA topology. | No |
-| PREP 1/8 | Test NSIP TCP/22. | No |
-| PREP 2/8 | Verify authenticated raw SSH. | No |
-| PREP 3/8 | Read /var free space and require at least 5 GiB. | No |
+| Discovery | Query Console, skip standalone entries, validate reciprocal HA pairs, and create inventory.ini. | No |
+| PREP 1/8 | Test TCP/22. | No |
+| PREP 2/8 | Test authenticated raw SSH. | No |
+| PREP 3/8 | Require configured free space in /var. | No |
 | PREP 4/8 | Ensure /var/nsinstall exists. | No |
-| PREP 5/8 | Upload firmware using controller-side scp -O. | No |
-| PREP 6/8 | Compare local and remote SHA-256. | No |
-| PREP 7/8 | Extract firmware. | No |
-| PREP 8/8 | Verify installns and write the firmware marker. | No |
+| PREP 5/8 | Reuse or upload the archive with controller-side scp -O. | No |
+| PREP 6/8 | Verify the remote SHA-256. | No |
+| PREP 7/8 | Extract the archive in /var/nsinstall. | No |
+| PREP 8/8 | Verify installns and write the readiness marker. | No |
 
-Preparation never runs installns and never reboots an appliance. It does not
-require the appliance Python runtime.
+Stage 1 does not run installns, change the boot loader, reboot, change HA roles,
+disable HA controls, or create a backup.
 
-### 10.6 Monitor preparation
+Outputs:
 
-The SCP task uses quiet mode and no_log to protect its password environment.
-A quiet screen while transferring a 1.2 GiB image is normal.
+- inventory.ini
+- prepared_firmware.yml
+- reports/prep-<UTC-ID>.md
+- reports/prep-<UTC-ID>.json
 
-Open a second controller session:
+## 10. Handle standalone appliances
 
-~~~bash
-pgrep -af 'ansible-playbook.*upgrade_prep.yaml'
-
-ps -eo pid,etime,stat,pcpu,pmem,args |
-grep -E '[a]nsible-playbook|[s]cp|[s]shpass'
-~~~
-
-With prep_devices_parallel=2, two SCP processes mean both devices are being
-uploaded concurrently. A parent Ansible process plus worker processes is normal.
-
-Watch network counters:
+The generator skips an instance when Console explicitly reports
+is_ha_configured as false. A missing attribute is invalid data and stops
+discovery. Skipped instances are recorded under skipped_non_ha_instances in
+JSON and under Standalone/non-HA Console instances skipped in Markdown.
 
 ~~~bash
-watch -n 10 'ss -tinp | grep -A2 -E "10\.100\.[0-9]+\.[0-9]+:22"'
+LATEST_PREP_MD="$(ls -t reports/prep-*.md | head -n 1)"
+less "$LATEST_PREP_MD"
+
+sed -n '/Standalone\/non-HA Console instances skipped/,/### Unreachable/p' \
+  "$LATEST_PREP_MD"
+
+LATEST_PREP_JSON="$(ls -t reports/prep-*.json | head -n 1)"
+jq '.skipped_non_ha_instances' "$LATEST_PREP_JSON"
 ~~~
 
-Increasing bytes_sent confirms progress. Ctrl+C in this second terminal stops
-watch only; it does not stop the playbook.
+Required operator action:
 
-Check remote size if needed:
+- If intentionally standalone, remove it from the HA change scope and use a
+  separate standalone runbook.
+- Plan its own outage, external backup/rollback, and application validation.
+- If it should be HA, correct appliance and Console topology, wait for healthy
+  HA state, and rerun Stage 1.
+- Never manually add it to netscaler_ha_pairs or invent a peer.
 
-~~~bash
-ansible -i inventory.ini \
-  'ns_10_100_48_1:ns_10_100_48_2' \
-  -m ansible.builtin.raw \
-  -a "'ls -lh /var/nsinstall/build-14.1-73.33_nc_64.tgz 2>/dev/null || echo UPLOAD_IN_PROGRESS'" \
-  --ask-vault-pass
-~~~
+Standalone appliances are not included in prepared_device_count or
+expected_device_count. Those counts apply only to validated HA nodes.
 
-After SCP ends, remote checksum calculation and extraction may also take several
-minutes. Investigate only if process, network, and file-size counters remain
-unchanged for approximately ten minutes.
-
-### 10.7 Validate the preparation gate
+## 11. Review the preparation gate
 
 ~~~bash
 ls -lt reports/prep-* | head
-
-sed -n '1,260p' "$(ls -t reports/prep-*.md | head -n 1)"
+less "$(ls -t reports/prep-*.md | head -n 1)"
 
 grep -E \
-  '^(prepared_firmware_successful|prepared_target_version|prepared_device_count|expected_device_count|prepared_at):' \
+  '^(prepared_firmware_successful|prepared_target_version|prepared_firmware_sha256|prepared_device_count|expected_device_count|prepared_at):' \
   prepared_firmware.yml
 ~~~
 
-Example for three pairs:
+Required result:
 
 ~~~yaml
 prepared_firmware_successful: true
@@ -367,22 +259,54 @@ prepared_device_count: 6
 expected_device_count: 6
 ~~~
 
-Do not start Stage 2 when the success flag is false, counts differ, or any
-device is unreachable, below the free-space threshold, or failed upload,
-checksum, extraction, or installer validation.
+Do not continue if the success flag is false, HA-node counts differ, or any HA
+node failed connectivity, authentication, space, upload, checksum, extraction,
+or installer validation.
 
-A preparation rerun safely checks an existing archive checksum and can reuse a
-matching remote file.
+A rerun reuses an existing remote archive when its SHA-256 matches.
 
-### 10.8 Run the upgrade
+## 12. Validate inventory and live state
 
-Confirm that another upgrade process is not active:
+~~~bash
+ansible-inventory -i inventory.ini --graph
+
+ansible -i inventory.ini netscaler_nodes \
+  -m ansible.builtin.raw \
+  -a 'echo CONNECTION_OK' \
+  --ask-vault-pass
+
+ansible -i inventory.ini netscaler_nodes \
+  -m ansible.builtin.raw \
+  -a 'ssh_netscaler_adc show ns version' \
+  --ask-vault-pass
+
+ansible -i inventory.ini netscaler_nodes \
+  -m ansible.builtin.raw \
+  -a 'ssh_netscaler_adc show ha node 0' \
+  --ask-vault-pass
+~~~
+
+Each pair must have one local Primary, one local Secondary, both nodes UP, and
+equal readable versions. If roles changed after Stage 1, rerun Stage 1.
+
+## 13. Run Stage 2
+
+Confirm no other upgrade is active:
 
 ~~~bash
 pgrep -af 'ansible-playbook.*upgrade'
 ~~~
 
-Start two full pairs concurrently:
+Start conservatively:
+
+~~~bash
+ansible-playbook upgrade_perform.yaml \
+  -i inventory.ini \
+  --ask-vault-pass \
+  -e ha_pairs_parallel=1
+~~~
+
+After validation, use configured concurrency:
 
 ~~~bash
 ansible-playbook upgrade_perform.yaml \
@@ -391,195 +315,110 @@ ansible-playbook upgrade_perform.yaml \
   -e ha_pairs_parallel=2
 ~~~
 
-Use upgrade_perform.yaml as the supported operator entry point. Do not run it
-and ha_upgrade.yaml at the same time.
+Use upgrade_perform.yaml as the operator entry point. Never run it and
+ha_upgrade.yaml simultaneously.
 
-## 11. Detailed Stage 2 sequence
+## 14. Current Stage 2 sequence
 
-| Display | Operation |
+| Display | Current operation |
 |---|---|
-| STEP 01/12 | Initialize result tracking and announce original roles. |
-| STEP 02/12 | Validate matching versions, reachability, local roles and `UP`; reconcile a partial prior isolation; force sync; then disable and save haSync/haProp. |
-| STEP 03–05/12 | Create a full backup; upgrade, reboot once, reconnect, and validate the original Secondary. |
-| STEP 06/12 | Fail over to the upgraded original Secondary and validate both roles. |
-| STEP 07–09/12 | Create a full backup; upgrade, reboot once, reconnect, and validate the original Primary. |
-| STEP 10/12 | Fail back and poll until the original roles return. |
-| STEP 11/12 | Read final HA state from both nodes. |
-| STEP 12/12 | Validate both target versions and restored roles. |
-| Always | Read live versions and roles; restore HA controls only when safe, otherwise require manual recovery. |
-| Final sync | Force synchronization from the restored original Primary. |
+| Initialization | Verify concurrency, preparation success, target version, and inventory SHA-256. |
+| Preflight | Test TCP/22 for all HA nodes and summarize reachability. |
+| STEP 01/12 | Initialize pair result tracking. |
+| STEP 02/12 | Require preflight; validate local roles and UP state with show ha node 0; require equal versions; disable and save haSync/haProp; verify isolation. |
+| STEP 03-05/12 | Upgrade and validate the original Secondary, or skip install/reboot if already at target. |
+| STEP 06/12 | Require both nodes UP, fail over, and verify inverted roles. |
+| STEP 07-09/12 | Upgrade and validate the original Primary, or skip install/reboot if already at target. |
+| STEP 10/12 | Require both nodes UP in inverted roles and fail back. |
+| STEP 11/12 | Confirm original roles are restored. |
+| STEP 12/12 | Require both nodes at target and original roles restored. |
+| Always | Read live versions/roles, restore HA controls only when safe, and build the pair report. |
+| Final sync | Force synchronization from the restored original Primary after pair success and HA-control restoration. |
 
-Nodes in the same pair are never upgraded simultaneously. Two independent pair
-workflows can advance together when ha_pairs_parallel is 2.
+There is no backup task and no pre-isolation forced synchronization in the
+current implementation.
 
-For every reboot, the playbook completes or recognizes target install state,
-sends exactly one reboot request, observes TCP/22 stop, waits for TCP/22 to
-return, requires a 180-second post-SSH stabilization window, then polls the
-authenticated CLI for up to 600 seconds and requires the exact target.
-An HTTP connection close is accepted only when TCP/22 subsequently stops. ICMP
-ping is optional (`reboot_ping_check_enabled`) and disabled by default.
+Per-node behavior:
 
-Polling occurs every five seconds. The stabilization window is intentionally
-fixed because TCP/22 can open while appliance services are still booting. The
-playbook allows at least 1,200 seconds for SSH to return and never sends a
-second reboot when a boot exceeds the timeout.
+- Already running target: skip installns and reboot, then validate.
+- Target selected in loader.conf with target kernel present: skip installns and
+  continue with controlled reboot.
+- Otherwise: run native ./installns -Y -n synchronously.
+- Send one NITRO reboot request.
+- Observe TCP/22 stop and return, stabilize, then poll show ns version.
 
-## 12. Monitor installns and reboot
+If the original Secondary fails, the original Primary is not upgraded.
+If one node starts at target and its peer does not, the pair stops at the
+equal-version gate before isolation. When both already run target, node install
+and reboot are skipped, but pair isolation, failover, failback, HA-control
+restoration, and final synchronization still run.
 
-Controller process:
+## 15. Monitor the change
 
 ~~~bash
 pgrep -af 'ansible-playbook.*upgrade_perform.yaml'
+
+ps -eo pid,ppid,etime,stat,pcpu,pmem,args |
+grep -E '[a]nsible-playbook|[s]sh|[s]cp|[s]shpass'
 ~~~
 
-The install task remains on screen until the synchronous `installns` command
-finishes. There is no installer polling loop.
+The installns task is synchronous, so the terminal remains on that task until
+the appliance command returns. See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for
+appliance process, loader, install-state, reboot, and HA commands.
 
-From an appliance BSD shell:
-
-~~~sh
-ps -axo pid,etime,stat,command | grep '[i]nstallns'
-grep -E '^(VERSION|END_TIME)' /var/nsinstall/installns_state
-~~~
-
-Interpretation:
-
-- Active installns: do not manually reboot or launch another installer.
-- Target kernel selected in `/flash/boot/loader.conf`: a retry can resume at
-  controlled reboot.
-
-## 13. Completion and reports
+## 16. Read reports
 
 ~~~bash
+ls -lt reports/prep-* | head
 ls -lt reports/upgrade-* | head
-sed -n '1,300p' "$(ls -t reports/upgrade-*.md | head -n 1)"
+
+LATEST_UPGRADE_MD="$(ls -t reports/upgrade-*.md | head -n 1)"
+echo "$LATEST_UPGRADE_MD"
+less "$LATEST_UPGRADE_MD"
 ~~~
 
-A pair succeeds only when both nodes run the target version, original roles are
-restored, haSync and haProp are enabled and saved, final synchronization
-succeeds, and all ordered tasks completed.
-
-Reports are written before the playbook returns a failing exit code for any
-failed pair.
-
-## 14. Snapshot and retry rules
-
-If any NetScaler VM snapshot is restored, rerun Stage 1 for the full fleet.
-Snapshots can remove the uploaded archive, extracted files, marker, install
-state, or role changes while the controller still contains newer metadata.
-Never trust an old prepared_firmware.yml after snapshot restoration.
-
-If Stage 2 stops after installns, inspect the process and install state before
-retrying:
-
-~~~sh
-ps -axo pid,etime,stat,command | grep '[i]nstallns'
-grep -E '^(VERSION|END_TIME)' /var/nsinstall/installns_state
-~~~
-
-Never launch a second installns while one is active. A matching target loader
-and kernel allow the playbook to skip duplicate installation and continue with
-controlled reboot and validation.
-
-If HA control restoration fails, manually confirm original roles, haSync
-ENABLED, haProp ENABLED, healthy RPC/HA state, and configuration synchronization
-on both nodes before retrying.
-
-## 15. Troubleshooting commands
-
-Free-space parser:
+In less, use /FAILED, press n for the next match, and q to exit.
 
 ~~~bash
-git pull --ff-only
-grep -nF "regex_findall('([0-9]+) +[0-9]+%')" upgrade_prep.yaml
+grep -nEi -A12 -B3 'FAILED|MANUAL_RECOVERY|Failures|error' \
+  "$LATEST_UPGRADE_MD"
 
-ansible -i inventory.ini ns_10_100_48_1 \
+LATEST_UPGRADE_JSON="$(ls -t reports/upgrade-*.json | head -n 1)"
+python3 -m json.tool "$LATEST_UPGRADE_JSON" | less
+~~~
+
+With jq:
+
+~~~bash
+jq '.results[] | {
+  pair,
+  status,
+  original_primary,
+  original_secondary,
+  primary_before,
+  primary_after,
+  secondary_before,
+  secondary_after,
+  error
+}' "$LATEST_UPGRADE_JSON"
+~~~
+
+Reports are written before the final failing assertion. That assertion is
+expected when one or more pairs are not SUCCESS.
+
+Per-node controller evidence:
+
+~~~bash
+ls -lt reports/upgrade-*-installns.txt reports/upgrade-*-postboot.txt 2>/dev/null
+~~~
+
+## 17. Post-change validation
+
+~~~bash
+ansible -i inventory.ini netscaler_nodes \
   -m ansible.builtin.raw \
-  -a "'df -Pk /var'" \
+  -a 'ssh_netscaler_adc show ns version' \
   --ask-vault-pass
-~~~
-
-A parser failure is not automatically insufficient space. The playbook reports
-INSUFFICIENT_SPACE only after parsing an actual value.
-
-Incorrect password:
-
-~~~bash
-ansible-vault edit group_vars/all/vault.yml
-
-ansible -i inventory.ini ns_10_100_48_1 \
-  -m ansible.builtin.raw \
-  -a 'echo CONNECTION_OK' \
-  --ask-vault-pass
-~~~
-
-Appliance Python or libcrypto error: do not modify NetScaler system libraries.
-Update the repository and collection. Preparation and installer operations are
-designed to use raw SSH.
-
-~~~bash
-git pull --ff-only
-ansible-galaxy collection list netscaler.adc
-~~~
-
-The maintained workflow does not use the NetScaler Ansible async directory.
-The official installns command runs synchronously over raw SSH.
-
-### SHA-256 appears missing or mismatched
-
-Current preparation accepts a NetScaler login banner appended directly to a
-valid 64-character digest. Update before retrying:
-
-~~~bash
-git pull --ff-only
-git log -1 --oneline
-
-ansible -i inventory.ini ns_10_100_48_1 \
-  -m ansible.builtin.raw \
-  -a "'sha256 -q /var/nsinstall/build-14.1-73.33_nc_64.tgz'" \
-  --ask-vault-pass
-
-sha256sum new_firmware/build-14.1-73.33_nc_64.tgz
-~~~
-
-If the digests match, rerunning Stage 1 reuses the already uploaded archive.
-A true mismatch causes a fresh upload and validation.
-
-### HA role check fails immediately
-
-If all pairs fail at Confirm original Primary role is still current with a
-non-zero return code, update the repository. NetScaler CLI commands must be sent
-directly through the connection-plugin bypass marker; BSD commands must use the
-plugin's shell path.
-
-~~~bash
-git pull --ff-only
-git log -1 --oneline
-
-ansible -i inventory.ini ns_10_100_48_1 \
-  -m ansible.builtin.raw \
-  -a 'ssh_netscaler_adc show ha node' \
-  --ask-vault-pass
-~~~
-
-The output must contain Master State : Primary for the recorded Primary.
-Failure at this check occurs before HA controls, installns, or reboot are
-changed, so it is safe to correct the command routing and retry.
-
-### hanode reports a duplicate primary key
-
-Collection 2.17.0 can authenticate to NITRO successfully but fail while reading
-`hanode id=0` because the endpoint returns both HA nodes. The diagnostic ends
-with text similar to `Found more than one resource with the same primary key`.
-This is a collection read-path problem, not a bad password and not evidence that
-the appliance was modified.
-
-Update the repository. The maintained playbook avoids this module path and uses
-the collection's SSH connection plugin with the documented local-node commands:
-
-~~~bash
-git pull --ff-only
-git log -1 --oneline
 
 ansible -i inventory.ini netscaler_nodes \
   -m ansible.builtin.raw \
@@ -587,126 +426,48 @@ ansible -i inventory.ini netscaler_nodes \
   --ask-vault-pass
 ~~~
 
-Before Stage 2, each local node must show `Propagation: ENABLED`; `Sync State`
-must be `ENABLED` on the Primary and normally `SUCCESS` on the Secondary.
+Expected final state:
 
-### installns command fails
+- Every HA node runs the target build.
+- Original Primary and Secondary roles are restored.
+- Every node is UP.
+- Propagation is ENABLED.
+- Sync State is ENABLED or SUCCESS.
+- Every report row is SUCCESS.
 
-The playbook runs `./installns -Y -n` directly from the Stage 1 installer
-directory without a separate marker/permission gate. Its stdout, stderr, and
-return code are captured by the Ansible task.
-If it fails, no reboot is requested and the original Primary is not upgraded.
+Application, data-plane, certificate, license, interface, routing, GSLB,
+Gateway, WAF, and monitoring validation remain environment-specific operator
+responsibilities.
 
-Update and perform a syntax check before retrying:
+## 18. Retry rules
 
-~~~bash
-git pull --ff-only
-git log -1 --oneline
+- Never run two Stage 2 processes simultaneously.
+- Never retry blindly after MANUAL_RECOVERY_REQUIRED.
+- Rerun Stage 1 after firmware, inventory, topology, role, or snapshot changes.
+- Never trust old prepared_firmware.yml after restoring an appliance snapshot.
+- Before retrying, check versions, roles, node state, HA controls, installns,
+  loader target, and the latest report.
+- Never start a second installns while one is active.
+- Never force HA synchronization across mixed or unknown versions.
+- Keep mixed or unreachable pairs isolated until controlled recovery.
 
-ansible-playbook upgrade_perform.yaml \
-  -i inventory.ini \
-  --syntax-check
-~~~
+## 19. Audit evidence
 
-The failed launch does not run `installns` and does not reboot the appliance.
-The recovery section first compares live versions and roles; it re-enables
-`haSync` and `haProp` only when safe. A Secondary response of `Warning: The
-running configuration has not changed` during `save ns config` is accepted only
-when subsequent state verification passes.
-
-## 16. SSH resets while restoring HA controls
-
-A Secondary can reset TCP/22 while rebooting and the NITRO HTTP request can end
-with `Remote end closed connection without response`. That message alone is not
-a failed reboot. The current playbook verifies that TCP/22 stops, waits up to
-1,200 seconds for it to return, waits another 180 seconds for boot stabilization,
-and then polls authenticated CLI output for up to 600 seconds. If the Secondary does not
-complete these checks, the original Primary is skipped and the next pair can
-continue. Reports are still written even if a pair returns no normal completion
-record.
-
-If this occurs on an older checkout, stop that controller run before it starts
-another pair, wait for both nodes, and restore the controls explicitly:
-
-~~~bash
-# First Ctrl+C in the running Ansible terminal, then A to abort.
-
-ansible -i inventory.ini localhost -c local -m ansible.builtin.wait_for \
-  -a 'host=10.100.48.2 port=22 state=started delay=5 sleep=5 timeout=600' \
-  --ask-vault-pass
-
-ansible -i inventory.ini \
-  'ns_10_100_48_1:ns_10_100_48_2' \
-  -m ansible.builtin.raw \
-  -a 'ssh_netscaler_adc set ha node -hasync ENABLED -haprop ENABLED' \
-  --ask-vault-pass
-
-ansible -i inventory.ini \
-  'ns_10_100_48_1:ns_10_100_48_2' \
-  -m ansible.builtin.raw \
-  -a 'ssh_netscaler_adc save ns config' \
-  --ask-vault-pass
-
-ansible -i inventory.ini \
-  'ns_10_100_48_1:ns_10_100_48_2' \
-  -m ansible.builtin.raw \
-  -a 'ssh_netscaler_adc show ha node 0' \
-  --ask-vault-pass
-~~~
-
-Repeat with the affected pair addresses. Require `Propagation: ENABLED` and
-`Sync State: ENABLED` or `SUCCESS` on both nodes. Then check running versions
-and live roles before deciding whether the idempotent upgrade can be resumed.
-Do not force HA synchronization until both nodes are reachable, healthy, and
-running compatible versions.
-
-If Stage 2 reports `There is no response from the secondary. Propagation timed
-out` at `Force a clean synchronization before isolation`, the controller is
-running an older checkout. That pre-isolation synchronization was removed: it
-can fail before `installns` even though both nodes passed role and reachability
-checks. Update the repository and retry; preparation does not need to be
-repeated when `prepared_firmware.yml` is still valid.
-
-## 17. VM console repeats CAM/SCSI Busy during boot
-
-Messages such as these are produced by the appliance kernel, not by Ansible:
-
-~~~text
-CAM status: SCSI Status Error
-SCSI status: Busy
-Retrying command
-~~~
-
-They indicate that the guest cannot complete disk I/O during boot. The playbook
-does not send another reboot. It times out that Secondary, does not start the
-original Primary, retains HA isolation when the live versions cannot be proven
-equal, records `MANUAL_RECOVERY_REQUIRED`, and continues scheduling other pairs.
-
-For a lab, inspect the hypervisor datastore/controller and reset the affected
-VM once if your change procedure permits it. In production, treat repeated disk
-errors as an infrastructure incident: capture the console, validate storage
-latency/errors and the virtual SCSI controller, and involve the platform team.
-Do not solve recurring disk I/O faults by increasing the Ansible timeout.
-
-## 18. Audit evidence
-
-Retain:
-
-- Git commit SHA.
-- Ansible and collection versions.
-- Sanitized variables.
-- Firmware SHA-256.
-- Preparation JSON and Markdown reports.
-- Upgrade JSON and Markdown reports.
-- Console topology export.
-- Application validation evidence.
-- Manual recovery actions.
-
-Record the execution baseline:
+Retain the Git SHA, Ansible/collection versions, sanitized configuration,
+firmware SHA-256, Stage 1 and Stage 2 reports, per-node evidence, Console
+topology export, external backup evidence, and application-validation records.
 
 ~~~bash
 git rev-parse HEAD
 git status --short
 ansible --version
 ansible-galaxy collection list netscaler.adc
+sha256sum new_firmware/*
 ~~~
+
+## 20. Disclaimer
+
+This code and documentation are provided on a best-effort, as-is basis with no
+warranty or guarantee. Use is at the operator's risk. The authors and
+contributors have no obligation to provide future support, maintenance,
+upgrades, compatibility work, or bug fixes. See [DISCLAIMER.md](DISCLAIMER.md).
