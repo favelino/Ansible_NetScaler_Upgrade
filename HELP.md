@@ -163,9 +163,9 @@ but only after the reports are safely written.
 - Review a failed pair before retrying; do not blindly increase concurrency.
 - If the report says HA control restoration failed, manually verify and restore
   `haSync ENABLED` and `haProp ENABLED` on both nodes before retrying.
-- A retry checks `/var/nsinstall/installns_state`. When it contains the target
-  `VERSION` and `END_TIME`, the playbook does not run `installns` again; it
-  resumes with the controlled reboot and post-boot validation.
+- A retry checks the selected loader kernel and target image in `/flash`. When
+  both match the target, the playbook does not run `installns` again; it resumes
+  with the controlled reboot and post-boot validation.
 - If the state is incomplete, review the failed Ansible task and the controller
   report before retrying.
 - Keep the reports for audit and change-control evidence.
@@ -445,7 +445,8 @@ grep -E '^(VERSION|END_TIME)' /var/nsinstall/installns_state
 Interpretation:
 
 - Active installns: do not manually reboot or launch another installer.
-- Target VERSION plus END_TIME: a retry can resume at controlled reboot.
+- Target kernel selected in `/flash/boot/loader.conf`: a retry can resume at
+  controlled reboot.
 
 ## 13. Completion and reports
 
@@ -476,8 +477,8 @@ ps -axo pid,etime,stat,command | grep '[i]nstallns'
 grep -E '^(VERSION|END_TIME)' /var/nsinstall/installns_state
 ~~~
 
-Never launch a second installns while one is active. Matching target VERSION and
-END_TIME allow the playbook to skip duplicate installation and continue with
+Never launch a second installns while one is active. A matching target loader
+and kernel allow the playbook to skip duplicate installation and continue with
 controlled reboot and validation.
 
 If HA control restoration fails, manually confirm original roles, haSync
