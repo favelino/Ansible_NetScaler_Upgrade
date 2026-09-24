@@ -20,17 +20,19 @@ prep_devices_parallel: 20
 # Override at runtime with: -e ha_pairs_parallel=5
 ha_pairs_parallel: 2
 
-# Connectivity, reboot, installer, and HA polling timers (seconds).
-# Timeouts are maximums; successful checks continue immediately.
+# Connectivity, reboot, and HA polling timers (seconds).
+# Successful checks continue immediately. The node task enforces safety floors
+# of 300 seconds for SSH to stop, 1200 seconds for SSH to return, and 600
+# seconds for authenticated CLI polling.
 netscaler_ssh_port: 22
 preflight_connect_timeout: 5
 reboot_request_timeout: 30
-reboot_down_timeout: 120
-reboot_up_timeout: 600
+reboot_down_timeout: 300
+reboot_up_timeout: 1200
 reboot_ssh_initial_delay: 5
 reboot_poll_interval: 5
-post_reboot_cli_timeout: 180
-reboot_ping_check_enabled: false
+post_reboot_stabilization_seconds: 180
+post_reboot_cli_timeout: 600
 ha_transition_timeout: 180
 ha_poll_interval: 5
 recovery_probe_timeout: 60
