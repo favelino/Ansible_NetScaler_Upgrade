@@ -660,6 +660,13 @@ and live roles before deciding whether the idempotent upgrade can be resumed.
 Do not force HA synchronization until both nodes are reachable, healthy, and
 running compatible versions.
 
+If Stage 2 reports `There is no response from the secondary. Propagation timed
+out` at `Force a clean synchronization before isolation`, the controller is
+running an older checkout. That pre-isolation synchronization was removed: it
+can fail before `installns` even though both nodes passed role and reachability
+checks. Update the repository and retry; preparation does not need to be
+repeated when `prepared_firmware.yml` is still valid.
+
 ## 17. VM console repeats CAM/SCSI Busy during boot
 
 Messages such as these are produced by the appliance kernel, not by Ansible:
