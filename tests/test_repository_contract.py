@@ -7,6 +7,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositoryContractTests(unittest.TestCase):
+    def test_documentation_matches_current_no_backup_workflow(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        runbook = (ROOT / "HELP.md").read_text(encoding="utf-8")
+        troubleshooting = (ROOT / "TROUBLESHOOTING.md").read_text(encoding="utf-8")
+        disclaimer = (ROOT / "DISCLAIMER.md").read_text(encoding="utf-8")
+        combined = "\n".join((readme, runbook)).lower()
+        self.assertNotIn("creates a full system backup", combined)
+        self.assertNotIn("create a full backup", combined)
+        self.assertIn("does **not** create", combined)
+        self.assertIn("standalone", combined)
+        self.assertIn("troubleshooting.md", readme.lower())
+        self.assertIn("installns", troubleshooting)
+        self.assertIn("no obligation", disclaimer.lower())
+
     def test_two_stage_entry_points_exist(self):
         prep = (ROOT / "upgrade_prep.yaml").read_text(encoding="utf-8")
         perform = (ROOT / "upgrade_perform.yaml").read_text(encoding="utf-8")
