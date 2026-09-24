@@ -105,12 +105,9 @@ The console displays fleet preflight counts and pair-specific steps. A pair is
 blocked if either NSIP becomes unreachable or if the live roles no longer match
 the inventory created during preparation. Other healthy pairs continue.
 
-During `installns`, the controller polls persistent `.pid`, `.log`, and
-`.rc` files inside the prepared `/var/nsinstall` directory; it does not depend on
-`~/.ansible_async`, which is not reliably available on NetScaler. Repeated
-poll messages mean the installer is still running, not that another installer
-was started. The persistent launch and polling use raw SSH and remain usable if
-the appliance's bundled Python runtime is unavailable before or after staging.
+During `installns`, the controller keeps the raw SSH task open and waits for the
+official `./installns -Y -n` command to finish. No Ansible async directory,
+background process, PID file, RC file, or remote log file is used.
 
 The ordered sequence for each pair is:
 
@@ -169,10 +166,8 @@ but only after the reports are safely written.
 - A retry checks `/var/nsinstall/installns_state`. When it contains the target
   `VERSION` and `END_TIME`, the playbook does not run `installns` again; it
   resumes with the controlled reboot and post-boot validation.
-- If the state is incomplete, inspect the persistent log named
-  `/var/nsinstall/.ansible-installns-<target>.log` before retrying.
-- A non-zero persistent `.rc` is retained. Review the log first; only then may
-  an operator authorize one retry with `-e retry_failed_installns=true`.
+- If the state is incomplete, review the failed Ansible task and the controller
+  report before retrying.
 - Keep the reports for audit and change-control evidence.
 
 
@@ -437,27 +432,20 @@ Controller process:
 pgrep -af 'ansible-playbook.*upgrade_perform.yaml'
 ~~~
 
-Repeated FAILED - RETRYING messages during polling normally mean that the
-persistent return-code file is not ready. They do not indicate that Ansible
-started another installer.
+The install task remains on screen until the synchronous `installns` command
+finishes. There is no installer polling loop.
 
 From an appliance BSD shell:
 
 ~~~sh
 ps -axo pid,etime,stat,command | grep '[i]nstallns'
-ls -la /var/nsinstall/.ansible-installns-*
-cat /var/nsinstall/.ansible-installns-14.1-73.33.rc
-tail -n 100 /var/nsinstall/.ansible-installns-14.1-73.33.log
 grep -E '^(VERSION|END_TIME)' /var/nsinstall/installns_state
 ~~~
 
 Interpretation:
 
 - Active installns: do not manually reboot or launch another installer.
-- Missing return-code file: installation has not published completion.
-- Return code 0: firmware staging completed successfully.
 - Target VERSION plus END_TIME: a retry can resume at controlled reboot.
-- Non-zero return code: inspect the persistent log before retrying.
 
 ## 13. Completion and reports
 
@@ -480,12 +468,11 @@ Snapshots can remove the uploaded archive, extracted files, marker, install
 state, or role changes while the controller still contains newer metadata.
 Never trust an old prepared_firmware.yml after snapshot restoration.
 
-If Stage 2 stops after installns, inspect process, return code, and install state
-before retrying:
+If Stage 2 stops after installns, inspect the process and install state before
+retrying:
 
 ~~~sh
 ps -axo pid,etime,stat,command | grep '[i]nstallns'
-cat /var/nsinstall/.ansible-installns-14.1-73.33.rc
 grep -E '^(VERSION|END_TIME)' /var/nsinstall/installns_state
 ~~~
 
@@ -534,9 +521,8 @@ git pull --ff-only
 ansible-galaxy collection list netscaler.adc
 ~~~
 
-The maintained workflow does not use the unreliable NetScaler Ansible async
-directory. installns uses persistent PID, log, and return-code files under
-the prepared `/var/nsinstall` directory.
+The maintained workflow does not use the NetScaler Ansible async directory.
+The official installns command runs synchronously over raw SSH.
 
 ### SHA-256 appears missing or mismatched
 
@@ -603,21 +589,11 @@ ansible -i inventory.ini netscaler_nodes \
 Before Stage 2, each local node must show `Propagation: ENABLED`; `Sync State`
 must be `ENABLED` on the Primary and normally `SUCCESS` on the Secondary.
 
-### installns launch says the complete command is not found
+### installns command fails
 
-If every pair fails at `Start installns without remote Python` with output
-similar to the following, no installer was started:
-
-~~~text
-sh: cd /var/nsinstall && (nohup ...): not found
-ERROR: Export failed.
-~~~
-
-The `netscaler.adc.ssh_netscaler_adc` connection plugin automatically prefixes
-BSD commands with the NetScaler `shell` command. Quoting the complete compound
-command adds a second shell-quoting layer and makes the appliance interpret the
-entire line as one executable name. The maintained playbook quotes paths and the
-inner `/bin/sh -c` script only, not the complete outer command.
+The playbook runs `./installns -Y -n` directly from the prepared firmware
+directory. Its stdout, stderr, and return code are captured by the Ansible task.
+If it fails, no reboot is requested and the original Primary is not upgraded.
 
 Update and perform a syntax check before retrying:
 
