@@ -34,12 +34,6 @@ reboot_ping_check_enabled: false
 ha_transition_timeout: 180
 ha_poll_interval: 5
 recovery_probe_timeout: 60
-upgrade_install_timeout: 3600
-upgrade_poll_interval: 15
-
-# Safety controls.
-create_pre_upgrade_backup: true
-retry_failed_installns: false
 
 # NITRO reboot endpoint. HTTPS is recommended.
 netscaler_management_protocol: https
