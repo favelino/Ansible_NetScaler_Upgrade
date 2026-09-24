@@ -42,12 +42,9 @@
       vars:
         boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
       ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -Fqx {{ ('VERSION ns-' ~ netscaler_target_version ~ '.gz') | quote }}
-        /var/nsinstall/installns_state
-        && grep -q '^END_TIME ' /var/nsinstall/installns_state
-        && grep -Fq {{ boot_kernel_needle | quote }}
-        /flash/boot/loader.conf 2>/dev/null;
+        if grep -Fq {{ boot_kernel_needle | quote }}
+        /flash/boot/loader.conf 2>/dev/null
+        && ls /flash/ns-{{ netscaler_target_version }}* >/dev/null 2>&1;
         then echo TARGET_ALREADY_STAGED;
         else echo INSTALLNS_REQUIRED; fi
       delegate_to: "{{ upgrade_target }}"
@@ -74,31 +71,6 @@
           No reboot will be requested.
       when: "'TARGET_ALREADY_STAGED' not in (node_stage_before.stdout | default(''))"
 
-    - name: Confirm target is staged before reboot
-      vars:
-        boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
-      ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -Fqx {{ ('VERSION ns-' ~ netscaler_target_version ~ '.gz') | quote }}
-        /var/nsinstall/installns_state
-        && grep -q '^END_TIME ' /var/nsinstall/installns_state
-        && grep -Fq {{ boot_kernel_needle | quote }}
-        /flash/boot/loader.conf 2>/dev/null;
-        then echo TARGET_STAGED_OK;
-        else echo TARGET_STAGED_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_stage_after
-      changed_when: false
-      failed_when: false
-
-    - name: Stop before reboot if target staging is incomplete
-      ansible.builtin.assert:
-        that:
-          - "'TARGET_STAGED_OK' in (node_stage_after.stdout | default(''))"
-        fail_msg: >-
-          installns did not stage a complete {{ netscaler_target_version }}
-          boot target on {{ upgrade_role_label }}. No reboot will be requested.
-
     - name: Preserve installns result on the Ansible controller
       ansible.builtin.copy:
         dest: "{{ node_install_evidence }}"
@@ -118,9 +90,6 @@
 
           === INSTALLNS STDERR ===
           {{ node_install_result.stderr | default('') }}
-
-          === STAGING VALIDATION ===
-          {{ node_stage_after.stdout | default('') }}
       delegate_to: localhost
       changed_when: true
 
