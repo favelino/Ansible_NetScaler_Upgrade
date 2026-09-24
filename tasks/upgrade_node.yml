@@ -5,354 +5,120 @@
   register: node_version_before_raw
   changed_when: false
 
-- name: Find current version in complete command output
+- name: Parse current version
   ansible.builtin.set_fact:
     node_version_before_matches: >-
       {{ node_version_before_raw.stdout | default('')
          | regex_findall('(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)') }}
 
-- name: Validate current version output
+- name: Require a readable current version
   ansible.builtin.assert:
-    that: [node_version_before_matches | length > 0]
+    that:
+      - node_version_before_matches | length > 0
     fail_msg: >-
       Could not parse the running version reported by {{ upgrade_role_label }}.
-      No disruptive action was taken.
+      No install or reboot was attempted.
 
-- name: Set current version
+- name: Set current version and controller evidence paths
   ansible.builtin.set_fact:
     node_version_before: "{{ node_version_before_matches[0][0] ~ '-' ~ node_version_before_matches[0][1] }}"
+    node_install_evidence: >-
+      {{ report_directory }}/upgrade-{{ hostvars['localhost'].upgrade_run_id }}-{{ upgrade_target }}-installns.txt
+    node_postboot_evidence: >-
+      {{ report_directory }}/upgrade-{{ hostvars['localhost'].upgrade_run_id }}-{{ upgrade_target }}-postboot.txt
 
 - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Show {{ upgrade_role_label }} plan"
   ansible.builtin.debug:
     msg: >-
-      {{ upgrade_role_label }} {{ hostvars[upgrade_target].nsip }} is {{ node_version_before }};
-      target is {{ netscaler_target_version }}.
-      {{ 'Upgrade required.' if node_version_before != netscaler_target_version else 'Already at target; disruptive steps will be skipped.' }}
+      {{ upgrade_role_label }} {{ hostvars[upgrade_target].nsip }} is
+      {{ node_version_before }}; target is {{ netscaler_target_version }}.
+      {{ 'Upgrade required.' if node_version_before != netscaler_target_version
+         else 'Already at target; install and reboot will be skipped.' }}
 
-- name: Upgrade node when it is not already at target
+- name: Install and reboot node when it is not already at target
   when: node_version_before != netscaler_target_version
   block:
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Verify preparation marker"
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Confirm prepared installer exists"
       ansible.builtin.raw: >-
-        if test -f {{ prepared_firmware_remote_marker | quote }};
-        then echo PREP_MARKER_OK; else echo PREP_MARKER_MISSING; fi
+        if test -f {{ prepared_firmware_remote_marker | quote }}
+        && test -x {{ prepared_firmware_remote_installns | quote }};
+        then echo PREPARED_INSTALLER_OK;
+        else echo PREPARED_INSTALLER_MISSING; fi
       delegate_to: "{{ upgrade_target }}"
-      register: node_preparation_marker
+      register: node_prepared_installer
       changed_when: false
       failed_when: false
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Recheck prepared archive SHA-256"
-      ansible.builtin.raw: >-
-        sha256 -q {{ prepared_firmware_remote_archive | quote }}
-      delegate_to: "{{ upgrade_target }}"
-      register: node_prepared_archive
-      changed_when: false
-      failed_when: false
-
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Verify prepared installns"
-      ansible.builtin.raw: >-
-        if test -f {{ prepared_firmware_remote_installns | quote }};
-        then echo INSTALLNS_FILE_OK; else echo INSTALLNS_FILE_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_prepared_installns
-      changed_when: false
-      failed_when: false
-
-    - name: Confirm this node passed the preparation stage
+    - name: Require the prepared installer
       ansible.builtin.assert:
         that:
-          - "'PREP_MARKER_OK' in (node_preparation_marker.stdout | default(''))"
-          - prepared_firmware_sha256 in (node_prepared_archive.stdout | default(''))
-          - "'INSTALLNS_FILE_OK' in (node_prepared_installns.stdout | default(''))"
+          - "'PREPARED_INSTALLER_OK' in (node_prepared_installer.stdout | default(''))"
         fail_msg: >-
-          The verified preparation marker, archive checksum, or installns is
-          invalid on {{ upgrade_role_label }}. Run upgrade_prep.yaml again.
-      delegate_to: localhost
+          The preparation marker or executable installns is missing on
+          {{ upgrade_role_label }}. Run upgrade_prep.yaml again.
 
-    - name: Set backup and persistent installns tracking paths
-      ansible.builtin.set_fact:
-        node_backup_name: >-
-          ansible_pre_{{ node_version_before | regex_replace('[^A-Za-z0-9_.-]', '_') }}_to_{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}
-        node_install_log: >-
-          {{ prepared_firmware_remote_installns | dirname }}/.ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.log
-        node_install_rc: >-
-          {{ prepared_firmware_remote_installns | dirname }}/.ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.rc
-        node_install_pid: >-
-          {{ prepared_firmware_remote_installns | dirname }}/.ansible-installns-{{ netscaler_target_version | regex_replace('[^A-Za-z0-9_.-]', '_') }}.pid
-        node_install_evidence: >-
-          {{ report_directory }}/upgrade-{{ hostvars['localhost'].upgrade_run_id }}-{{ upgrade_target }}-installns.txt
-        node_postboot_evidence: >-
-          {{ report_directory }}/upgrade-{{ hostvars['localhost'].upgrade_run_id }}-{{ upgrade_target }}-postboot.txt
-
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Check pre-upgrade backup"
-      ansible.builtin.raw: ssh_netscaler_adc show system backup
-      delegate_to: "{{ upgrade_target }}"
-      register: node_backup_before
-      changed_when: false
-      when: create_pre_upgrade_backup | bool
-
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Create full pre-upgrade backup"
-      ansible.builtin.raw: >-
-        ssh_netscaler_adc create system backup {{ node_backup_name }} -level full
-      delegate_to: "{{ upgrade_target }}"
-      changed_when: true
-      when:
-        - create_pre_upgrade_backup | bool
-        - node_backup_name not in (node_backup_before.stdout | default(''))
-
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Verify pre-upgrade backup"
-      ansible.builtin.raw: ssh_netscaler_adc show system backup
-      delegate_to: "{{ upgrade_target }}"
-      register: node_backup_after
-      until:
-        - node_backup_after.rc | default(1) == 0
-        - node_backup_name in (node_backup_after.stdout | default(''))
-      retries: 12
-      delay: 5
-      changed_when: false
-      when: create_pre_upgrade_backup | bool
-
-    - name: Confirm the pre-upgrade backup exists
-      ansible.builtin.assert:
-        that: [node_backup_name in (node_backup_after.stdout | default(''))]
-        fail_msg: >-
-          Full backup {{ node_backup_name }} was not confirmed on {{ upgrade_role_label }}.
-          installns was not started.
-      when: create_pre_upgrade_backup | bool
-
-    - name: Inspect staged target version without remote Python
-      ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -Fqx {{ ('VERSION ns-' ~ netscaler_target_version ~ '.gz') | quote }}
-        /var/nsinstall/installns_state;
-        then echo INSTALL_STATE_VERSION_OK; else echo INSTALL_STATE_VERSION_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_state_version
-      changed_when: false
-      failed_when: false
-
-    - name: Inspect staged completion time without remote Python
-      ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -q '^END_TIME ' /var/nsinstall/installns_state;
-        then echo INSTALL_STATE_END_OK; else echo INSTALL_STATE_END_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_state_end
-      changed_when: false
-      failed_when: false
-
-    - name: Inspect persistent installns return code without remote Python
-      ansible.builtin.raw: >-
-        if test -f {{ node_install_rc | quote }};
-        then rc=$(tr -d '[:space:]' < {{ node_install_rc | quote }});
-        echo INSTALLNS_RC=$rc; else echo INSTALLNS_RC_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_rc_existing
-      changed_when: false
-      failed_when: false
-
-    - name: Inspect running installns process without remote Python
-      ansible.builtin.raw: >-
-        if pgrep -f '[i]nstallns' >/dev/null 2>&1;
-        then echo INSTALLNS_RUNNING; else echo INSTALLNS_NOT_RUNNING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_process_existing
-      changed_when: false
-      failed_when: false
-
-    - name: Inspect target kernel and boot-loader selection without remote Python
+    - name: Check whether installns already staged the target
       vars:
         boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
       ansible.builtin.raw: >-
-        if grep -Fq {{ boot_kernel_needle | quote }}
+        if test -f /var/nsinstall/installns_state
+        && grep -Fqx {{ ('VERSION ns-' ~ netscaler_target_version ~ '.gz') | quote }}
+        /var/nsinstall/installns_state
+        && grep -q '^END_TIME ' /var/nsinstall/installns_state
+        && grep -Fq {{ boot_kernel_needle | quote }}
         /flash/boot/loader.conf 2>/dev/null;
-        then echo BOOT_LOADER_TARGET_OK; else echo BOOT_LOADER_TARGET_MISSING; fi;
-        if ls /flash/ns-{{ netscaler_target_version }}* >/dev/null 2>&1;
-        then echo TARGET_KERNEL_OK; else echo TARGET_KERNEL_MISSING; fi;
-        if test -f /flash/boot/loader.conf.local;
-        then if grep -Fq {{ boot_kernel_needle | quote }}
-        /flash/boot/loader.conf.local;
-        then echo LOCAL_BOOT_LOADER_TARGET_OK;
-        else echo LOCAL_BOOT_LOADER_TARGET_MISSING; fi;
-        else echo LOCAL_BOOT_LOADER_NOT_PRESENT; fi
+        then echo TARGET_ALREADY_STAGED;
+        else echo INSTALLNS_REQUIRED; fi
       delegate_to: "{{ upgrade_target }}"
-      register: node_boot_target_existing
+      register: node_stage_before
       changed_when: false
       failed_when: false
 
-    - name: Parse persistent installns return code
-      ansible.builtin.set_fact:
-        node_existing_rc_matches: >-
-          {{ node_install_rc_existing.stdout | default('') | regex_findall('INSTALLNS_RC=([0-9]+)') }}
-
-    - name: Calculate resumable installns state
-      ansible.builtin.set_fact:
-        node_install_resume_state: >-
-          {{ 'INSTALLNS_FAILED'
-             if (node_existing_rc_matches | length > 0 and node_existing_rc_matches[0] | int != 0)
-             else 'INSTALLNS_RUNNING'
-             if 'INSTALLNS_RUNNING' in (node_install_process_existing.stdout | default(''))
-             else 'INSTALLNS_STAGED'
-             if (node_existing_rc_matches | length > 0
-                 and node_existing_rc_matches[0] | int == 0
-                 and 'INSTALL_STATE_VERSION_OK' in (node_install_state_version.stdout | default(''))
-                 and 'INSTALL_STATE_END_OK' in (node_install_state_end.stdout | default(''))
-                 and 'BOOT_LOADER_TARGET_OK' in (node_boot_target_existing.stdout | default(''))
-                 and 'TARGET_KERNEL_OK' in (node_boot_target_existing.stdout | default('')))
-             else 'INSTALLNS_REQUIRED' }}
-
-    - name: Reject a previous failed installns unless retry is explicitly authorized
-      ansible.builtin.assert:
-        that:
-          - node_install_resume_state != 'INSTALLNS_FAILED' or retry_failed_installns | bool
-        fail_msg: >-
-          A previous installns returned RC={{ node_existing_rc_matches[0] | default('unknown') }}
-          on {{ upgrade_role_label }}. Inspect {{ node_install_log }}. To authorize
-          clearing the failed tracking files and retrying only this installer, set
-          retry_failed_installns=true.
-
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Show safe resume decision"
-      ansible.builtin.debug:
-        msg: >-
-          {{ upgrade_role_label }} installns for {{ netscaler_target_version }}
-          {{ 'has matching return code, state, target kernel, and boot-loader entry; continuing at the controlled reboot.' if node_install_resume_state == 'INSTALLNS_STAGED'
-             else 'is already running; reconnecting to its persistent return-code file.' if node_install_resume_state == 'INSTALLNS_RUNNING'
-             else 'previously failed; explicit retry is authorized.' if node_install_resume_state == 'INSTALLNS_FAILED'
-             else 'must run; stale or incomplete installer state is not accepted.' }}
-
-    - name: Remove stale installns tracking files
-      ansible.builtin.raw: >-
-        rm -f {{ node_install_log | quote }} {{ node_install_rc | quote }}
-        {{ node_install_pid | quote }}
-      delegate_to: "{{ upgrade_target }}"
-      when: >-
-        node_install_resume_state == 'INSTALLNS_REQUIRED'
-        or (node_install_resume_state == 'INSTALLNS_FAILED' and retry_failed_installns | bool)
-      changed_when: true
-
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Start installns without remote Python on {{ upgrade_role_label }}"
-      vars:
-        node_install_script: >-
-          ./installns -Y -n > {{ node_install_log | quote }} 2>&1;
-          rc=$?; echo $rc > {{ node_install_rc | quote }}
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Run official installns synchronously"
       ansible.builtin.raw: >-
         cd {{ (prepared_firmware_remote_installns | dirname) | quote }}
-        || exit 1;
-        nohup /bin/sh -c {{ node_install_script | quote }}
-        </dev/null >/dev/null 2>&1 &
-        installer_pid=$!;
-        echo $installer_pid > {{ node_install_pid | quote }}
+        && ./installns -Y -n
       delegate_to: "{{ upgrade_target }}"
-      when: >-
-        node_install_resume_state == 'INSTALLNS_REQUIRED'
-        or (node_install_resume_state == 'INSTALLNS_FAILED' and retry_failed_installns | bool)
+      register: node_install_result
       changed_when: true
+      when: "'TARGET_ALREADY_STAGED' not in (node_stage_before.stdout | default(''))"
 
-    - name: Confirm installns launcher created persistent tracking
-      ansible.builtin.raw: >-
-        if test -s {{ node_install_pid | quote }};
-        then echo INSTALLNS_TRACKING_OK;
-        cat {{ node_install_pid | quote }};
-        else echo INSTALLNS_TRACKING_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_launch
-      changed_when: false
-      when: >-
-        node_install_resume_state == 'INSTALLNS_REQUIRED'
-        or (node_install_resume_state == 'INSTALLNS_FAILED' and retry_failed_installns | bool)
-
-    - name: Stop immediately if installns did not launch
+    - name: Require installns success
       ansible.builtin.assert:
         that:
-          - "'INSTALLNS_TRACKING_OK' in (node_install_launch.stdout | default(''))"
+          - node_install_result.rc | default(0) == 0
         fail_msg: >-
-          installns did not create its persistent PID file on
-          {{ upgrade_role_label }}. No reboot was requested.
-      when: >-
-        node_install_resume_state == 'INSTALLNS_REQUIRED'
-        or (node_install_resume_state == 'INSTALLNS_FAILED' and retry_failed_installns | bool)
+          The official installns command failed on {{ upgrade_role_label }}
+          with rc={{ node_install_result.rc | default('unknown') }}.
+          No reboot will be requested.
+      when: "'TARGET_ALREADY_STAGED' not in (node_stage_before.stdout | default(''))"
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Poll installns completion"
-      ansible.builtin.raw: >-
-        if test -f {{ node_install_rc | quote }};
-        then rc=$(tr -d '[:space:]' < {{ node_install_rc | quote }});
-        echo INSTALLNS_RC=$rc;
-        elif test -s {{ node_install_pid | quote }}
-        && kill -0 $(cat {{ node_install_pid | quote }}) 2>/dev/null;
-        then echo INSTALLNS_RC_PENDING;
-        else echo INSTALLNS_TRACKING_LOST; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_status
-      changed_when: false
-      failed_when: false
-      until: >-
-        (node_install_status.stdout | default(''))
-        is search('INSTALLNS_RC=[0-9]+|INSTALLNS_TRACKING_LOST')
-      retries: >-
-        {{ ((upgrade_install_timeout | int) / (upgrade_poll_interval | int)) | round(0, 'ceil') | int }}
-      delay: "{{ upgrade_poll_interval | int }}"
-      when: node_install_resume_state != 'INSTALLNS_STAGED'
-
-    - name: Stop immediately if installns tracking was lost
-      ansible.builtin.assert:
-        that:
-          - "'INSTALLNS_TRACKING_LOST' not in (node_install_status.stdout | default(''))"
-        fail_msg: >-
-          installns is not running and did not write its return-code file on
-          {{ upgrade_role_label }}. No reboot was requested.
-      when: node_install_resume_state != 'INSTALLNS_STAGED'
-
-    - name: Read installns log tail before any reboot
-      ansible.builtin.raw: >-
-        if test -f {{ node_install_log | quote }};
-        then tail -n 200 {{ node_install_log | quote }};
-        else echo INSTALLNS_LOG_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_log_tail
-      changed_when: false
-      failed_when: false
-
-    - name: Validate staged target version without remote Python
-      ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -Fqx {{ ('VERSION ns-' ~ netscaler_target_version ~ '.gz') | quote }}
-        /var/nsinstall/installns_state;
-        then echo INSTALL_STATE_VERSION_OK; else echo INSTALL_STATE_VERSION_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_state_version_after
-      changed_when: false
-      failed_when: false
-
-    - name: Validate staged completion time without remote Python
-      ansible.builtin.raw: >-
-        if test -f /var/nsinstall/installns_state
-        && grep -q '^END_TIME ' /var/nsinstall/installns_state;
-        then echo INSTALL_STATE_END_OK; else echo INSTALL_STATE_END_MISSING; fi
-      delegate_to: "{{ upgrade_target }}"
-      register: node_install_state_end_after
-      changed_when: false
-      failed_when: false
-
-    - name: Validate target kernel and boot-loader selection before reboot
+    - name: Confirm target is staged before reboot
       vars:
         boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
       ansible.builtin.raw: >-
-        if grep -Fq {{ boot_kernel_needle | quote }}
+        if test -f /var/nsinstall/installns_state
+        && grep -Fqx {{ ('VERSION ns-' ~ netscaler_target_version ~ '.gz') | quote }}
+        /var/nsinstall/installns_state
+        && grep -q '^END_TIME ' /var/nsinstall/installns_state
+        && grep -Fq {{ boot_kernel_needle | quote }}
         /flash/boot/loader.conf 2>/dev/null;
-        then echo BOOT_LOADER_TARGET_OK; else echo BOOT_LOADER_TARGET_MISSING; fi;
-        if ls /flash/ns-{{ netscaler_target_version }}* >/dev/null 2>&1;
-        then echo TARGET_KERNEL_OK; else echo TARGET_KERNEL_MISSING; fi;
-        echo BOOT_LOADER_CONTENT_BEGIN;
-        grep -n 'kernel' /flash/boot/loader.conf
-        /flash/boot/loader.conf.local 2>/dev/null;
-        echo BOOT_LOADER_CONTENT_END;
-        df -Pk /flash /var
+        then echo TARGET_STAGED_OK;
+        else echo TARGET_STAGED_MISSING; fi
       delegate_to: "{{ upgrade_target }}"
-      register: node_boot_target_after
+      register: node_stage_after
       changed_when: false
       failed_when: false
 
-    - name: Preserve installns evidence on the Ansible controller
+    - name: Stop before reboot if target staging is incomplete
+      ansible.builtin.assert:
+        that:
+          - "'TARGET_STAGED_OK' in (node_stage_after.stdout | default(''))"
+        fail_msg: >-
+          installns did not stage a complete {{ netscaler_target_version }}
+          boot target on {{ upgrade_role_label }}. No reboot will be requested.
+
+    - name: Preserve installns result on the Ansible controller
       ansible.builtin.copy:
         dest: "{{ node_install_evidence }}"
         mode: "0600"
@@ -361,39 +127,21 @@
           Pair: {{ pair_name }}
           Role: {{ upgrade_role_label }}
           Host: {{ upgrade_target }} ({{ hostvars[upgrade_target].nsip }})
-          Runtime version before install: {{ node_version_before }}
+          Version before: {{ node_version_before }}
           Target version: {{ netscaler_target_version }}
-          Resume decision: {{ node_install_resume_state }}
+          Previously staged: {{ 'TARGET_ALREADY_STAGED' in (node_stage_before.stdout | default('')) }}
+          installns rc: {{ node_install_result.rc | default('not run') }}
 
-          === RETURN CODE POLL ===
-          {{ (node_install_status | default({})).stdout | default('INSTALLNS_STAGED_RESUME') }}
+          === INSTALLNS STDOUT ===
+          {{ node_install_result.stdout | default('installns was already staged') }}
 
-          === INSTALLNS STATE ===
-          {{ node_install_state_version_after.stdout | default('') }}
-          {{ node_install_state_end_after.stdout | default('') }}
+          === INSTALLNS STDERR ===
+          {{ node_install_result.stderr | default('') }}
 
-          === TARGET BOOT EVIDENCE BEFORE REBOOT ===
-          {{ node_boot_target_after.stdout | default('') }}
-
-          === INSTALLNS LOG TAIL ===
-          {{ node_install_log_tail.stdout | default('') }}
+          === STAGING VALIDATION ===
+          {{ node_stage_after.stdout | default('') }}
       delegate_to: localhost
       changed_when: true
-
-    - name: Confirm completed installns state
-      ansible.builtin.assert:
-        that:
-          - >-
-            node_install_resume_state == 'INSTALLNS_STAGED'
-            or 'INSTALLNS_RC=0' in ((node_install_status | default({})).stdout | default(''))
-          - "'INSTALL_STATE_VERSION_OK' in (node_install_state_version_after.stdout | default(''))"
-          - "'INSTALL_STATE_END_OK' in (node_install_state_end_after.stdout | default(''))"
-          - "'BOOT_LOADER_TARGET_OK' in (node_boot_target_after.stdout | default(''))"
-          - "'TARGET_KERNEL_OK' in (node_boot_target_after.stdout | default(''))"
-        fail_msg: >-
-          installns did not leave a complete, bootable {{ netscaler_target_version }} image on
-          {{ upgrade_role_label }}. The node will not be rebooted. Review
-          {{ node_install_evidence }} on the Ansible controller.
 
     - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Request one reboot of {{ upgrade_role_label }}"
       ansible.builtin.uri:
@@ -415,7 +163,7 @@
       failed_when: false
       no_log: true
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Confirm {{ upgrade_role_label }} actually started rebooting"
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Confirm reboot started"
       ansible.builtin.wait_for:
         host: "{{ hostvars[upgrade_target].nsip }}"
         port: "{{ netscaler_ssh_port }}"
@@ -427,15 +175,15 @@
       changed_when: false
       failed_when: false
 
-    - name: Stop safely if the requested reboot never started
+    - name: Stop safely if reboot did not start
       ansible.builtin.assert:
-        that: [not (node_reboot_down.failed | default(false))]
+        that:
+          - not (node_reboot_down.failed | default(false))
         fail_msg: >-
-          The reboot request did not make SSH stop within
-          {{ [reboot_down_timeout | int, 300] | max }} seconds.
-          No second reboot was sent. Inspect {{ upgrade_role_label }} manually.
+          SSH did not stop after the reboot request. No second reboot was sent.
+          Inspect {{ upgrade_role_label }} manually.
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Wait for {{ upgrade_role_label }} SSH to return"
+    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Wait for SSH after reboot"
       ansible.builtin.wait_for:
         host: "{{ hostvars[upgrade_target].nsip }}"
         port: "{{ netscaler_ssh_port }}"
@@ -447,32 +195,16 @@
       delegate_to: localhost
       changed_when: false
 
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Allow {{ upgrade_role_label }} services to stabilize after SSH returns"
+    - name: Allow NetScaler services to stabilize
       ansible.builtin.wait_for:
         host: "{{ hostvars[upgrade_target].nsip }}"
         port: "{{ netscaler_ssh_port }}"
         state: started
         delay: "{{ post_reboot_stabilization_seconds | default(180) | int }}"
-        sleep: "{{ reboot_poll_interval }}"
         connect_timeout: 3
         timeout: "{{ (post_reboot_stabilization_seconds | default(180) | int) + 60 }}"
       delegate_to: localhost
       changed_when: false
-
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Announce post-reboot CLI validation"
-      ansible.builtin.debug:
-        msg: >-
-          {{ upgrade_role_label }} SSH returned and was reachable again after the
-          {{ post_reboot_stabilization_seconds | default(180) }}-second stabilization window.
-          Polling the authenticated NetScaler CLI for up to
-          {{ [post_reboot_cli_timeout | int, 600] | max }} seconds.
-
-    - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Optional management ping"
-      ansible.builtin.command:
-        argv: [ping, -c, "1", -W, "2", "{{ hostvars[upgrade_target].nsip }}"]
-      delegate_to: localhost
-      changed_when: false
-      when: reboot_ping_check_enabled | bool
 
 - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Read final {{ upgrade_role_label }} version"
   ansible.builtin.raw: ssh_netscaler_adc show ns version
@@ -488,44 +220,25 @@
   changed_when: false
   ignore_unreachable: true
 
-- name: Find final version in complete command output
+- name: Parse final version
   ansible.builtin.set_fact:
     node_version_after_matches: >-
       {{ node_version_after_raw.stdout | default('')
          | regex_findall('(?im)NS([0-9]+(?:[.][0-9]+)*): Build ([0-9]+(?:[.][0-9]+)*)') }}
 
-- name: Validate final version output
+- name: Require a readable final version
   ansible.builtin.assert:
-    that: [node_version_after_matches | length > 0]
+    that:
+      - node_version_after_matches | length > 0
     fail_msg: >-
-      {{ upgrade_role_label }} did not return an authenticated CLI version within
-      {{ [post_reboot_cli_timeout | int, 600] | max }} seconds. If the VM console shows repeated CAM/SCSI
-      Busy errors, reset the VM once manually and rerun after validating storage.
+      {{ upgrade_role_label }} did not return an authenticated CLI version after
+      the reboot. The other node in the pair will not be upgraded.
 
-- name: Set final version
+- name: Set and validate final version
   ansible.builtin.set_fact:
     node_version_after: "{{ node_version_after_matches[0][0] ~ '-' ~ node_version_after_matches[0][1] }}"
 
-- name: Inspect boot-loader selection after reboot
-  vars:
-    boot_kernel_needle: 'kernel="/ns-{{ netscaler_target_version }}'
-  ansible.builtin.raw: >-
-    echo RUNNING_VERSION={{ node_version_after | quote }};
-    if grep -Fq {{ boot_kernel_needle | quote }}
-    /flash/boot/loader.conf 2>/dev/null;
-    then echo BOOT_LOADER_TARGET_OK; else echo BOOT_LOADER_TARGET_MISSING; fi;
-    if ls /flash/ns-{{ netscaler_target_version }}* >/dev/null 2>&1;
-    then echo TARGET_KERNEL_OK; else echo TARGET_KERNEL_MISSING; fi;
-    grep -n 'kernel' /flash/boot/loader.conf
-    /flash/boot/loader.conf.local 2>/dev/null;
-    df -Pk /flash /var
-  delegate_to: "{{ upgrade_target }}"
-  register: node_postboot_target
-  changed_when: false
-  failed_when: false
-  when: node_version_before != netscaler_target_version
-
-- name: Preserve post-reboot boot evidence on the Ansible controller
+- name: Preserve post-reboot result on the Ansible controller
   ansible.builtin.copy:
     dest: "{{ node_postboot_evidence }}"
     mode: "0600"
@@ -536,9 +249,6 @@
       Host: {{ upgrade_target }} ({{ hostvars[upgrade_target].nsip }})
       Expected version: {{ netscaler_target_version }}
       Observed version: {{ node_version_after }}
-
-      === POST-REBOOT BOOT EVIDENCE ===
-      {{ node_postboot_target.stdout | default('') }}
   delegate_to: localhost
   changed_when: true
   when: node_version_before != netscaler_target_version
@@ -554,10 +264,9 @@
 
 - name: "STEP {{ upgrade_step_range }}/12 | {{ pair_name }} | Validate {{ upgrade_role_label }} version"
   ansible.builtin.assert:
-    that: [node_version_after == netscaler_target_version]
+    that:
+      - node_version_after == netscaler_target_version
     success_msg: "{{ upgrade_role_label }} is running {{ node_version_after }}."
     fail_msg: >-
       {{ upgrade_role_label }} version validation failed: expected
-      {{ netscaler_target_version }}, got {{ node_version_after }}. Review
-      {{ node_install_evidence | default('the installns evidence file') }} and
-      {{ node_postboot_evidence | default('the postboot evidence file') }} on the Ansible controller.
+      {{ netscaler_target_version }}, got {{ node_version_after }}.
